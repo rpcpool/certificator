@@ -1,12 +1,8 @@
 package config
 
 import (
-	"io/ioutil"
-	"os"
-
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
-	"gopkg.in/yaml.v2"
 )
 
 // Acme contains acme related configuration parameters
@@ -16,12 +12,14 @@ type Acme struct {
 	DNSPropagationRequirement bool   `envconfig:"ACME_DNS_PROPAGATION_REQUIREMENT" default:"true"`
 	ReregisterAccount         bool   `envconfig:"ACME_REREGISTER_ACCOUNT" default:"false"`
 	ServerURL                 string `envconfig:"ACME_SERVER_URL" default:"https://acme-staging-v02.api.letsencrypt.org/directory"`
+	EABKid                    string `envconfig:"EAB_KID"`
+	EABHmacKey                string `envconfig:"EAB_HMAC_KEY"`
 }
 
 // Vault contains vault related configuration parameters
 type Vault struct {
 	ApproleRoleID   string `envconfig:"VAULT_APPROLE_ROLE_ID"`
-	ApproleSecretID string `envconfig:"VAULT_APPROLE_SECRET_ID"`
+	ApproleSecretID string `envconfig:"NOMAD_TOKEN"`
 	KVStoragePath   string `envconfig:"VAULT_KV_STORAGE_PATH" default:"secret/data/certificator/"`
 }
 
@@ -37,9 +35,8 @@ type Config struct {
 	Log             Log
 	DNSAddress      string   `envconfig:"DNS_ADDRESS" default:"127.0.0.1:53"`
 	Environment     string   `envconfig:"ENVIRONMENT" default:"prod"`
-	DomainsFile     string   `envconfig:"CERTIFICATOR_DOMAINS_FILE" default:"/code/domains.yml"`
 	RenewBeforeDays int      `envconfig:"CERTIFICATOR_RENEW_BEFORE_DAYS" default:"30"`
-	Domains         []string `yaml:"domains"`
+	Domains         []string `envconfig:"CERTIFICATOR_DOMAINS"`
 }
 
 // LoadConfig loads configuration options to  variable
@@ -48,20 +45,6 @@ func LoadConfig() (Config, error) {
 	err := envconfig.Process("", &cfg)
 	if err != nil {
 		return Config{}, errors.Wrapf(err, "failed getting config from env")
-	}
-
-	f, err := os.Open(cfg.DomainsFile)
-	if err != nil {
-		return Config{}, errors.Wrapf(err, "opening %s", cfg.DomainsFile)
-	}
-
-	content, err := ioutil.ReadAll(f)
-	if err != nil {
-		return Config{}, errors.Wrapf(err, "reading content of %s", cfg.DomainsFile)
-	}
-
-	if err := yaml.Unmarshal(content, &cfg); err != nil {
-		return Config{}, errors.Wrapf(err, "parsing %s", cfg.DomainsFile)
 	}
 
 	return cfg, err

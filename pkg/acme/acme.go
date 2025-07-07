@@ -40,7 +40,7 @@ func (u *User) GetPrivateKey() crypto.PrivateKey {
 
 // NewClient initializes acme client and returns
 func NewClient(
-	email, serverURL string,
+	email, serverURL, eabKid, eabHmacKey string,
 	reregister bool,
 	vault *vault.VaultClient,
 	logger *logrus.Logger) (*lego.Client, error) {
@@ -55,7 +55,7 @@ func NewClient(
 		return nil, err
 	}
 
-	return registerAccount(acc, client, vault, serverURL, reregister, logger)
+	return registerAccount(acc, client, vault, serverURL, eabKid, eabHmacKey, reregister, logger)
 }
 
 func setupClient(
@@ -156,13 +156,13 @@ func getAccountKey(reregister bool, vault *vault.VaultClient, logger *logrus.Log
 }
 
 func registerAccount(acc *User, client *lego.Client, vault *vault.VaultClient,
-	serverURL string, reregister bool, logger *logrus.Logger) (*lego.Client, error) {
+	serverURL, eabKid, eabHmacKey string, reregister bool, logger *logrus.Logger) (*lego.Client, error) {
 	logger.Debug("checking client registration")
 	_, err := client.Registration.QueryRegistration()
 	if err != nil {
 		logger.Warn("registration not found")
 
-		client, err = recoverAccount(acc, client, vault, serverURL, reregister, logger)
+		client, err = recoverAccount(acc, client, vault, serverURL, eabKid, eabHmacKey, reregister, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +174,7 @@ func registerAccount(acc *User, client *lego.Client, vault *vault.VaultClient,
 }
 
 func recoverAccount(acc *User, client *lego.Client, vault *vault.VaultClient,
-	serverURL string, reregister bool, logger *logrus.Logger) (*lego.Client, error) {
+	serverURL, eabKid, eabHmacKey string, reregister bool, logger *logrus.Logger) (*lego.Client, error) {
 	// Try to resolve registration by private key
 	reg, err := client.Registration.ResolveAccountByKey()
 
@@ -190,7 +190,7 @@ func recoverAccount(acc *User, client *lego.Client, vault *vault.VaultClient,
 				return nil, err
 			}
 
-			reg, err = client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+			reg, err = client.Registration.RegisterWithExternalAccountBinding(registration.RegisterEABOptions{TermsOfServiceAgreed: true, Kid: eabKid, HmacEncoded: eabHmacKey})
 			if err != nil {
 				return nil, err
 			}
