@@ -46,7 +46,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	acmeClient, err := acme.NewClient(cfg.Acme.AccountEmail, cfg.Acme.ServerURL,
+	acmeClient, err := acme.NewClient(cfg.Acme.AccountEmail, cfg.Acme.ServerURL, cfg.Acme.EABKid, cfg.Acme.EABHmacKey,
 		cfg.Acme.ReregisterAccount, vaultClient, logger)
 	if err != nil {
 		logger.Fatal(err)
