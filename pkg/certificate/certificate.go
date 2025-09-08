@@ -48,7 +48,7 @@ func ObtainCertificate(client *lego.Client, vault *vault.VaultClient, domains []
 
 // GetCertificate reads certificate from Vault KV store and parses it
 func GetCertificate(domain string, vault *vault.VaultClient) (*x509.Certificate, error) {
-	secrets, err := vault.KVRead(vaultCertLocation(domain))
+	secrets, err := vault.KVRead(VaultCertLocation(domain))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func arrayContains(array []string, element string) bool {
 	return false
 }
 
-func vaultCertLocation(domain string) string {
+func VaultCertLocation(domain string) string {
 	return "certificates/" + domain
 }
 
@@ -125,5 +125,5 @@ func storeCertificateInVault(domain string, certs *certificate.Resource, vault *
 		"private_key":        string(certs.PrivateKey),
 		"issuer_certificate": string(certs.IssuerCertificate)}
 
-	return vault.KVWrite(vaultCertLocation(domain), payload)
+	return vault.KVWrite(VaultCertLocation(domain), payload)
 }

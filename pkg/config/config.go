@@ -7,13 +7,13 @@ import (
 
 // Acme contains acme related configuration parameters
 type Acme struct {
-	AccountEmail              string `envconfig:"ACME_ACCOUNT_EMAIL" required:"true"`
-	DNSChallengeProvider      string `envconfig:"ACME_DNS_CHALLENGE_PROVIDER" required:"true"`
+	AccountEmail              string `envconfig:"ACME_ACCOUNT_EMAIL" default:""`
+	DNSChallengeProvider      string `envconfig:"ACME_DNS_CHALLENGE_PROVIDER" default:""`
 	DNSPropagationRequirement bool   `envconfig:"ACME_DNS_PROPAGATION_REQUIREMENT" default:"true"`
 	ReregisterAccount         bool   `envconfig:"ACME_REREGISTER_ACCOUNT" default:"false"`
 	ServerURL                 string `envconfig:"ACME_SERVER_URL" default:"https://acme-staging-v02.api.letsencrypt.org/directory"`
-	EABKid                    string `envconfig:"EAB_KID"`
-	EABHmacKey                string `envconfig:"EAB_HMAC_KEY"`
+	EABKid                    string `envconfig:"EAB_KID" default:""`
+	EABHmacKey                string `envconfig:"EAB_HMAC_KEY" default:""`
 }
 
 // Vault contains vault related configuration parameters
@@ -33,10 +33,17 @@ type Config struct {
 	Acme            Acme
 	Vault           Vault
 	Log             Log
+	Certificatee    Certificatee
 	DNSAddress      string   `envconfig:"DNS_ADDRESS" default:"127.0.0.1:53"`
 	Environment     string   `envconfig:"ENVIRONMENT" default:"prod"`
 	RenewBeforeDays int      `envconfig:"CERTIFICATOR_RENEW_BEFORE_DAYS" default:"30"`
-	Domains         []string `envconfig:"CERTIFICATOR_DOMAINS"`
+	Domains         []string `envconfig:"CERTIFICATOR_DOMAINS" default:""`
+}
+
+// Configuration values specific to the certificatee tool
+type Certificatee struct {
+	CertificatePath      string `envconfig:"CERTIFICATEE_CERTIFICATE_PATH" default:""`
+	CertificateExtension string `envconfig:"CERTIFICATEE_CERTIFICATE_EXTENSION" default:""`
 }
 
 // LoadConfig loads configuration options to  variable
