@@ -1,15 +1,14 @@
 {
-  "features": {
-    "ghcr.io/devcontainers/features/common-utils": {
-      "configureZshAsDefaultShell": true,
-      "installOhMyZsh": true,
-      "installOhMyZshConfig": true,
-      "installZsh": true,
-      "upgradePackages": true
-    },
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
-    "ghcr.io/prulloac/devcontainer-features/pre-commit:1": {}
-  },
-  "image": "docker.io/golang:latest",
-  "name": "Certificator"
+    "name": "Certificator",
+    "image": "docker.io/golang:latest",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils": {
+            "installZsh": true,
+            "installOhMyZsh": true,
+            "installOhMyZshConfig": true,
+            "configureZshAsDefaultShell": true,
+            "upgradePackages": true
+        },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    }
 }
