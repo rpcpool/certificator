@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,19 +50,9 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	certDirFiles, err := os.ReadDir(cfg.Certificatee.CertificatePath)
+	certificateNames, err := getCertificateNames(cfg.Certificatee.CertificatePath, cfg.Certificatee.CertificateExtension)
 	if err != nil {
 		logger.Fatalf("Error: %v, Path: '%s', have you set CERTIFICATEE_CERTIFICATE_PATH?", err, cfg.Certificatee.CertificatePath)
-	}
-
-	var certificateNames []string
-
-	for _, certDirFile := range certDirFiles {
-		extension := filepath.Ext(certDirFile.Name())
-		if extension == cfg.Certificatee.CertificateExtension {
-			certificateName := strings.TrimSuffix(certDirFile.Name(), extension)
-			certificateNames = append(certificateNames, certificateName)
-		}
 	}
 
 	logger.Infof("%v Certificates found!", len(certificateNames))
@@ -70,51 +61,97 @@ func main() {
 		logger.Infof("Comparing certificates for %s", certificateName)
 		certificateFullPath := filepath.Clean(filepath.Join(cfg.Certificatee.CertificatePath, certificateName+cfg.Certificatee.CertificateExtension))
 
-		certificateFileContents, err := os.ReadFile(certificateFullPath)
+		shouldUpdateCertificate, err := shouldUpdateCertificate(logger, certificateFullPath, certificateName, vaultClient)
 		if err != nil {
 			logger.Error(err)
 			continue
 		}
 
-		parsedCertificateFile, err := certcrypto.ParsePEMBundle(certificateFileContents)
-		if err != nil {
-			logger.Error(err)
-			continue
-		}
-
-		parsedVaultCert, err := certificate.GetCertificate(certificateName, vaultClient)
-		if err != nil {
-			logger.Error(err)
-			continue
-		}
-
-		if !bytes.Equal(parsedCertificateFile[0].RawTBSCertificate, parsedVaultCert.RawTBSCertificate) {
-
-			certificateSecrets, err := vaultClient.KVRead(certificate.VaultCertLocation(certificateName))
-			if err != nil {
-				logger.Error(err)
-				continue
-			}
-
-			var newCertificateFile []byte
-
-			if vaultCertificate, ok := certificateSecrets["certificate"].(string); ok {
-				newCertificateFile = append(newCertificateFile, []byte(vaultCertificate)...)
-			}
-			if vaultPrivateKey, ok := certificateSecrets["private_key"].(string); ok {
-				newCertificateFile = append(newCertificateFile, []byte(vaultPrivateKey)...)
-			}
-
-			// Write key to file
-			err = os.WriteFile(certificateFullPath, newCertificateFile, 0600)
-			if err != nil {
-				logger.Error(err)
-				continue
-			} else {
-				logger.Infof("Certificate %s updated!", certificateName)
-			}
-		} else {
+		if !shouldUpdateCertificate {
 			logger.Infof("Certificate %s matches!", certificateName)
+			continue
+		}
+
+		err = updateCertificate(certificateFullPath, certificateName, vaultClient)
+		if err != nil {
+			logger.Error(err)
+			continue
+		} else {
+			logger.Infof("Certificate %s updated!", certificateName)
 		}
 	}
+}
+
+func getCertificateNames(path string, certificateExtension string) ([]string, error) {
+	var certificateNames []string
+
+	certDirFiles, err := os.ReadDir(path)
+	if err != nil {
+		return certificateNames, err
+	}
+
+	for _, certDirFile := range certDirFiles {
+		fileExtension := filepath.Ext(certDirFile.Name())
+		if certificateExtension == fileExtension {
+			certificateName := strings.TrimSuffix(certDirFile.Name(), certificateExtension)
+			certificateNames = append(certificateNames, certificateName)
+		}
+	}
+
+	return certificateNames, nil
+}
+
+func shouldUpdateCertificate(logger *logrus.Logger, path string, certificateName string, vaultClient *vault.VaultClient) (bool, error) {
+	certificateFileContents, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("error reading file at path %s - %w", path, err)
+	}
+
+	// If file is empty, always return true to write a new certificate
+	if certificateFileContents == nil {
+		logger.Infof("Certificate file for %s is empty, deploying certificate from vault..", certificateName)
+		return true, nil
+	}
+
+	// Else, parse and compare the certificate file contents with the Vault certificate
+	parsedCertificateFile, err := certcrypto.ParsePEMBundle(certificateFileContents)
+	if err != nil {
+		return false, fmt.Errorf("error parsing PEM bundle - %w", err)
+
+	}
+
+	parsedVaultCert, err := certificate.GetCertificate(certificateName, vaultClient)
+	if err != nil {
+		return false, fmt.Errorf("error getting certificate %s from vault - %w", certificateName, err)
+	}
+
+	if bytes.Equal(parsedCertificateFile[0].RawTBSCertificate, parsedVaultCert.RawTBSCertificate) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func updateCertificate(path string, certificateName string, vaultClient *vault.VaultClient) error {
+	certificateSecrets, err := vaultClient.KVRead(certificate.VaultCertLocation(certificateName))
+	if err != nil {
+		return fmt.Errorf("error reading data from vault key value storage %w", err)
+	}
+
+	var newCertificateFile []byte
+
+	if vaultCertificate, ok := certificateSecrets["certificate"].(string); ok {
+		newCertificateFile = append(newCertificateFile, []byte(vaultCertificate)...)
+	}
+	if vaultPrivateKey, ok := certificateSecrets["private_key"].(string); ok {
+		newCertificateFile = append(newCertificateFile, []byte(vaultPrivateKey)...)
+	}
+
+	// Write key to file
+	err = os.WriteFile(path, newCertificateFile, 0600)
+	if err != nil {
+		return fmt.Errorf("error writing new certificate to file %w", err)
+	}
+
+	return nil
 }
