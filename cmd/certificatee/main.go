@@ -102,18 +102,21 @@ func getCertificateNames(path string, certificateExtension string) ([]string, er
 }
 
 func shouldUpdateCertificate(logger *logrus.Logger, path string, certificateName string, vaultClient *vault.VaultClient) (bool, error) {
+	certificateFileInfo, err := os.Stat(path)
+	if err != nil {
+		return false, fmt.Errorf("error reading file at path %s - %w", path, err)
+	}
+
+	if certificateFileInfo.Size() == 0 {
+		logger.Infof("Certificate file for %s is empty, deploying certificate from vault..", certificateName)
+		return true, nil
+	}
+
 	certificateFileContents, err := os.ReadFile(path)
 	if err != nil {
 		return false, fmt.Errorf("error reading file at path %s - %w", path, err)
 	}
 
-	// If file is empty, always return true to write a new certificate
-	if certificateFileContents == nil {
-		logger.Infof("Certificate file for %s is empty, deploying certificate from vault..", certificateName)
-		return true, nil
-	}
-
-	// Else, parse and compare the certificate file contents with the Vault certificate
 	parsedCertificateFile, err := certcrypto.ParsePEMBundle(certificateFileContents)
 	if err != nil {
 		return false, fmt.Errorf("error parsing PEM bundle - %w", err)
