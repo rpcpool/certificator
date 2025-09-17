@@ -128,6 +128,11 @@ func shouldUpdateCertificate(logger *logrus.Logger, path string, certificateName
 		return false, fmt.Errorf("error getting certificate %s from vault - %w", certificateName, err)
 	}
 
+	if parsedVaultCert == nil {
+		logger.Infof("Certificate for %s does not exist in vault, ignoring..", certificateName)
+		return false, nil
+	}
+
 	if bytes.Equal(parsedCertificateFile[0].RawTBSCertificate, parsedVaultCert.RawTBSCertificate) {
 		return false, nil
 	}
