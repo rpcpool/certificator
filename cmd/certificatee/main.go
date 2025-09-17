@@ -67,17 +67,14 @@ func main() {
 			continue
 		}
 
-		if !shouldUpdateCertificate {
-			logger.Infof("Certificate %s matches!", certificateName)
-			continue
-		}
-
-		err = updateCertificate(certificateFullPath, certificateName, vaultClient)
-		if err != nil {
-			logger.Error(err)
-			continue
-		} else {
-			logger.Infof("Certificate %s updated!", certificateName)
+		if shouldUpdateCertificate {
+			err = updateCertificate(certificateFullPath, certificateName, vaultClient)
+			if err != nil {
+				logger.Error(err)
+				continue
+			} else {
+				logger.Infof("Certificate %s updated!", certificateName)
+			}
 		}
 	}
 }
@@ -134,6 +131,7 @@ func shouldUpdateCertificate(logger *logrus.Logger, path string, certificateName
 	}
 
 	if bytes.Equal(parsedCertificateFile[0].RawTBSCertificate, parsedVaultCert.RawTBSCertificate) {
+		logger.Infof("Certificate %s matches!", certificateName)
 		return false, nil
 	}
 
