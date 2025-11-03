@@ -2,6 +2,6 @@ FROM alpine:latest
 
 WORKDIR /app
 
-COPY certificator /app/certificator
+COPY certificator certificatee /app/
 
 CMD [ "/app/certificator" ]

@@ -67,6 +67,7 @@ func setupClient(
 
 	clientConfig := lego.NewConfig(acc)
 	clientConfig.CADirURL = serverURL
+	clientConfig.Certificate.KeyType = certcrypto.EC256
 
 	client, err := lego.NewClient(clientConfig)
 	if err != nil {
