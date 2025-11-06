@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - master
-      - certificatee
+      - fail-certificatee-more
 
 env:
   REGISTRY: ghcr.io
