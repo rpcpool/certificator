@@ -57,25 +57,31 @@ func main() {
 
 	logger.Infof("%v Certificates found!", len(certificateNames))
 
+	var failedCertificates []string
+
 	for _, certificateName := range certificateNames {
 		logger.Infof("Comparing certificates for %s", certificateName)
 		certificateFullPath := filepath.Clean(filepath.Join(cfg.Certificatee.CertificatePath, certificateName+cfg.Certificatee.CertificateExtension))
 
 		shouldUpdateCertificate, err := shouldUpdateCertificate(logger, certificateFullPath, certificateName, vaultClient)
 		if err != nil {
+			failedCertificates = append(failedCertificates, certificateName)
 			logger.Error(err)
-			continue
 		}
 
 		if shouldUpdateCertificate {
 			err = updateCertificate(certificateFullPath, certificateName, vaultClient)
 			if err != nil {
+				failedCertificates = append(failedCertificates, certificateName)
 				logger.Error(err)
-				continue
 			} else {
 				logger.Infof("Certificate %s updated!", certificateName)
 			}
 		}
+	}
+
+	if len(failedCertificates) > 0 {
+		logger.Fatalf("Failed to update certificates for: %v", failedCertificates)
 	}
 }
 
@@ -126,8 +132,7 @@ func shouldUpdateCertificate(logger *logrus.Logger, path string, certificateName
 	}
 
 	if parsedVaultCert == nil {
-		logger.Infof("Certificate for %s does not exist in vault, ignoring..", certificateName)
-		return false, nil
+		return false, fmt.Errorf("certificate for %s does not exist in vault", certificateName)
 	}
 
 	if bytes.Equal(parsedCertificateFile[0].RawTBSCertificate, parsedVaultCert.RawTBSCertificate) {
