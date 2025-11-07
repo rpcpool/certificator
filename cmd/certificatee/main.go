@@ -154,6 +154,10 @@ func updateCertificate(path string, certificateName string, vaultClient *vault.V
 	if vaultCertificate, ok := certificateSecrets["certificate"].(string); ok {
 		newCertificateFile = append(newCertificateFile, []byte(vaultCertificate)...)
 	}
+
+	// Add a new line between cert and key
+	newCertificateFile = append(newCertificateFile, []byte("\n")...)
+
 	if vaultPrivateKey, ok := certificateSecrets["private_key"].(string); ok {
 		newCertificateFile = append(newCertificateFile, []byte(vaultPrivateKey)...)
 	}
