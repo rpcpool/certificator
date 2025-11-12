@@ -1,6 +1,8 @@
 package config
 
 import (
+	"time"
+
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
 )
@@ -42,8 +44,9 @@ type Config struct {
 
 // Configuration values specific to the certificatee tool
 type Certificatee struct {
-	CertificatePath      string `envconfig:"CERTIFICATEE_CERTIFICATE_PATH" default:""`
-	CertificateExtension string `envconfig:"CERTIFICATEE_CERTIFICATE_EXTENSION" default:""`
+	CertificatePath      string        `envconfig:"CERTIFICATEE_CERTIFICATE_PATH" default:""`
+	CertificateExtension string        `envconfig:"CERTIFICATEE_CERTIFICATE_EXTENSION" default:""`
+	UpdateInterval       time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"24h"`
 }
 
 // LoadConfig loads configuration options to  variable
