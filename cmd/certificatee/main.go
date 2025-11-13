@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-acme/lego/certcrypto"
 	legoLog "github.com/go-acme/lego/v4/log"
@@ -50,6 +52,22 @@ func main() {
 		logger.Fatal(err)
 	}
 
+	ticker := time.NewTicker(cfg.Certificatee.UpdateInterval)
+	defer ticker.Stop()
+
+	// Initial run
+	if err := maybeUpdateCertificates(logger, cfg, vaultClient); err != nil {
+		logger.Fatal(err)
+	}
+
+	for range ticker.C {
+		if err := maybeUpdateCertificates(logger, cfg, vaultClient); err != nil {
+			logger.Error(err)
+		}
+	}
+}
+
+func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient) error {
 	certificateNames, err := getCertificateNames(cfg.Certificatee.CertificatePath, cfg.Certificatee.CertificateExtension)
 	if err != nil {
 		logger.Fatalf("Error: %v, Path: '%s', have you set CERTIFICATEE_CERTIFICATE_PATH?", err, cfg.Certificatee.CertificatePath)
@@ -57,22 +75,20 @@ func main() {
 
 	logger.Infof("%v Certificates found!", len(certificateNames))
 
-	var failedCertificates []string
-
+	var errs []error
 	for _, certificateName := range certificateNames {
 		logger.Infof("Comparing certificates for %s", certificateName)
 		certificateFullPath := filepath.Clean(filepath.Join(cfg.Certificatee.CertificatePath, certificateName+cfg.Certificatee.CertificateExtension))
 
 		shouldUpdateCertificate, err := shouldUpdateCertificate(logger, certificateFullPath, certificateName, vaultClient)
 		if err != nil {
-			failedCertificates = append(failedCertificates, certificateName)
+			errs = append(errs, err)
 			logger.Error(err)
 		}
 
 		if shouldUpdateCertificate {
-			err = updateCertificate(certificateFullPath, certificateName, vaultClient)
-			if err != nil {
-				failedCertificates = append(failedCertificates, certificateName)
+			if err := updateCertificate(certificateFullPath, certificateName, vaultClient); err != nil {
+				errs = append(errs, err)
 				logger.Error(err)
 			} else {
 				logger.Infof("Certificate %s updated!", certificateName)
@@ -80,9 +96,7 @@ func main() {
 		}
 	}
 
-	if len(failedCertificates) > 0 {
-		logger.Fatalf("Failed to update certificates for: %v", failedCertificates)
-	}
+	return errors.Join(errs...)
 }
 
 func getCertificateNames(path string, certificateExtension string) ([]string, error) {
