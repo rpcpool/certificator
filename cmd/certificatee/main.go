@@ -57,7 +57,7 @@ func main() {
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient); err != nil {
-		logger.Fatal(err)
+		logger.Error(err)
 	}
 
 	for range ticker.C {
