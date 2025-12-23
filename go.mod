@@ -1,6 +1,6 @@
 module github.com/vinted/certificator
 
-go 1.24.6
+go 1.25.5
 
 require (
 	github.com/go-acme/lego v2.7.2+incompatible
@@ -8,6 +8,7 @@ require (
 	github.com/hashicorp/vault/api v1.20.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/pkg/errors v0.9.1
+	github.com/prometheus/client_golang v1.11.0
 	github.com/sirupsen/logrus v1.9.3
 )
 
@@ -61,8 +62,10 @@ require (
 	github.com/aziontech/azionapi-go-sdk v0.142.0 // indirect
 	github.com/baidubce/bce-sdk-go v0.9.235 // indirect
 	github.com/benbjohnson/clock v1.3.0 // indirect
+	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/dimchansky/utfbom v1.1.1 // indirect
 	github.com/dnsimple/dnsimple-go/v4 v4.0.0 // indirect
@@ -119,6 +122,7 @@ require (
 	github.com/liquidweb/liquidweb-go v1.6.4 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/miekg/dns v1.1.67 // indirect
 	github.com/mimuret/golang-iij-dpf v0.9.1 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
@@ -146,6 +150,9 @@ require (
 	github.com/peterhellberg/link v1.2.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
+	github.com/prometheus/client_model v0.2.0 // indirect
+	github.com/prometheus/common v0.30.0 // indirect
+	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/regfish/regfish-dnsapi-go v0.1.1 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sacloud/api-client-go v0.3.2 // indirect
