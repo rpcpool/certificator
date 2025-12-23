@@ -112,7 +112,7 @@ func shouldUpdateCertificate(logger *logrus.Logger, path string, certificateName
 		return true, nil
 	}
 
-	certificateFileContents, err := os.ReadFile(path)
+	certificateFileContents, err := os.ReadFile(path) // nolint:gosec
 	if err != nil {
 		return false, fmt.Errorf("error reading file at path %s - %w", path, err)
 	}

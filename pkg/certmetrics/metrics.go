@@ -2,6 +2,7 @@ package certmetrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -16,8 +17,9 @@ func StartMetricsServer(logger *logrus.Logger, address string) {
 	}
 
 	metricsServer := &http.Server{
-		Addr:    address,
-		Handler: promhttp.Handler(),
+		Addr:              address,
+		Handler:           promhttp.Handler(),
+		ReadHeaderTimeout: 100 * time.Millisecond,
 	}
 
 	go func() {
@@ -35,5 +37,7 @@ func PushMetrics(logger *logrus.Logger, pushAddress string) {
 	}
 
 	logger.Infof("pushing metrics to %s", pushAddress)
-	push.New(pushAddress, "certificator").Gatherer(prometheus.DefaultGatherer).Push()
+	if err := push.New(pushAddress, "certificator").Gatherer(prometheus.DefaultGatherer).Push(); err != nil {
+		logger.Errorf("could not push metrics: %v", err)
+	}
 }
