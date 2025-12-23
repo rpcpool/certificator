@@ -13,38 +13,21 @@ import (
 	legoLog "github.com/go-acme/lego/v4/log"
 	"github.com/sirupsen/logrus"
 	"github.com/vinted/certificator/pkg/certificate"
+	"github.com/vinted/certificator/pkg/certmetrics"
 	"github.com/vinted/certificator/pkg/config"
 	"github.com/vinted/certificator/pkg/vault"
 )
 
 func main() {
-	logger := logrus.New()
-	legoLog.Logger = logger
-
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		logger.Fatal(err)
+		cfg.Log.Logger.Fatal(err)
 	}
 
-	switch cfg.Log.Format {
-	case "JSON":
-		logger.SetFormatter(&logrus.JSONFormatter{})
-	case "LOGFMT":
-		logger.SetFormatter(&logrus.TextFormatter{})
-	}
+	logger := cfg.Log.Logger
+	legoLog.Logger = logger
 
-	switch cfg.Log.Level {
-	case "DEBUG":
-		logger.SetLevel(logrus.DebugLevel)
-	case "INFO":
-		logger.SetLevel(logrus.InfoLevel)
-	case "WARN":
-		logger.SetLevel(logrus.WarnLevel)
-	case "ERROR":
-		logger.SetLevel(logrus.ErrorLevel)
-	case "FATAL":
-		logger.SetLevel(logrus.FatalLevel)
-	}
+	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
 
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
 		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)

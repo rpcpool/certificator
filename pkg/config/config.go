@@ -1,10 +1,12 @@
 package config
 
 import (
+	"strings"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 // Acme contains acme related configuration parameters
@@ -26,8 +28,14 @@ type Vault struct {
 }
 
 type Log struct {
-	Format string `envconfig:"LOG_FORMAT" default:"JSON"`
-	Level  string `envconfig:"LOG_LEVEL" default:"INFO"`
+	Format string         `envconfig:"LOG_FORMAT" default:"JSON"`
+	Level  string         `envconfig:"LOG_LEVEL" default:"INFO"`
+	Logger *logrus.Logger `envconfig:"-"`
+}
+
+type Metrics struct {
+	ListenAddress string `envconfig:"METRICS_LISTEN_ADDRESS" default:":9100"`
+	PushAddress   string `envconfig:"METRICS_PUSH_ADDRESS" default:""`
 }
 
 // Config contains all configuration parameters
@@ -35,6 +43,7 @@ type Config struct {
 	Acme            Acme
 	Vault           Vault
 	Log             Log
+	Metrics         Metrics
 	Certificatee    Certificatee
 	DNSAddress      string   `envconfig:"DNS_ADDRESS" default:"127.0.0.1:53"`
 	Environment     string   `envconfig:"ENVIRONMENT" default:"prod"`
@@ -51,11 +60,29 @@ type Certificatee struct {
 
 // LoadConfig loads configuration options to  variable
 func LoadConfig() (Config, error) {
-	var cfg Config
-	err := envconfig.Process("", &cfg)
-	if err != nil {
-		return Config{}, errors.Wrapf(err, "failed getting config from env")
+	cfg := Config{
+		Log: Log{
+			Logger: logrus.New(),
+		},
 	}
 
-	return cfg, err
+	if err := envconfig.Process("", &cfg); err != nil {
+		return cfg, errors.Wrapf(err, "failed getting config from env")
+	}
+
+	switch cfg.Log.Format {
+	case "JSON":
+		cfg.Log.Logger.SetFormatter(&logrus.JSONFormatter{})
+	default: // "LOGFMT" or any other value
+		cfg.Log.Logger.SetFormatter(&logrus.TextFormatter{})
+	}
+
+	logLevel, err := logrus.ParseLevel(strings.ToLower(cfg.Log.Level))
+	if err != nil {
+		cfg.Log.Logger.Errorf("Invalid log level: %s, using INFO", cfg.Log.Level)
+		logLevel = logrus.InfoLevel
+	}
+	cfg.Log.Logger.SetLevel(logLevel)
+
+	return cfg, nil
 }
