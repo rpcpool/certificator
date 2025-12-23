@@ -48,6 +48,14 @@ kos:
   - id: certificator
     build: certificator
     base_import_paths: true
+    tags:
+      - latest
+      - "{{.Tag}}"
+      - "{{if not .Prerelease}}stable{{end}}"
   - id: certificatee
     build: certificatee
     base_import_paths: true
+    tags:
+      - latest
+      - "{{.Tag}}"
+      - "{{if not .Prerelease}}stable{{end}}"
