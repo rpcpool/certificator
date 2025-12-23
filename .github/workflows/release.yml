@@ -16,6 +16,9 @@ jobs:
       attestations: write
       id-token: write
 
+    env:
+      KO_DOCKER_REPO: ghcr.io/rpcpool
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

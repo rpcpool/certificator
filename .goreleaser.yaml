@@ -47,9 +47,7 @@ changelog:
 kos:
   - id: certificator
     build: certificator
-    repositories:
-      - ghcr.io/rpcpool/certificator
+    base_import_paths: true
   - id: certificatee
     build: certificatee
-    repositories:
-      - ghcr.io/rpcpool/certificatee
+    base_import_paths: true
