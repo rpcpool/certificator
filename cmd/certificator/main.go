@@ -21,6 +21,7 @@ func main() {
 	legoLog.Logger = logger
 
 	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
+	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushAddress)
 
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
 		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)
@@ -33,6 +34,9 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
+
+	certmetrics.Up.WithLabelValues("certificator", cfg.Version, cfg.Hostname, cfg.Environment).Set(1)
+	defer certmetrics.Up.WithLabelValues("certificator", cfg.Version, cfg.Hostname, cfg.Environment).Set(0)
 
 	var failedDomains []string
 
@@ -64,11 +68,15 @@ func main() {
 				continue
 			}
 		} else {
+			certmetrics.CertificatesCurrent.WithLabelValues(mainDomain).Set(1)
 			logger.Infof("certificate for %s is up to date, skipping renewal", mainDomain)
 		}
 	}
 
 	if len(failedDomains) > 0 {
+		for _, domain := range failedDomains {
+			certmetrics.CertificatesReissueFailures.WithLabelValues(domain).Inc()
+		}
 		logger.Fatalf("Failed to renew certificates for: %v", failedDomains)
 	}
 }

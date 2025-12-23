@@ -28,6 +28,7 @@ func main() {
 	legoLog.Logger = logger
 
 	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
+	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushAddress)
 
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
 		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)
@@ -37,6 +38,9 @@ func main() {
 
 	ticker := time.NewTicker(cfg.Certificatee.UpdateInterval)
 	defer ticker.Stop()
+
+	certmetrics.Up.WithLabelValues("certificator", cfg.Version, cfg.Hostname, cfg.Environment).Set(1)
+	defer certmetrics.Up.WithLabelValues("certificator", cfg.Version, cfg.Hostname, cfg.Environment).Set(0)
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient); err != nil {
@@ -73,7 +77,9 @@ func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClie
 			if err := updateCertificate(certificateFullPath, certificateName, vaultClient); err != nil {
 				errs = append(errs, err)
 				logger.Error(err)
+				certmetrics.CertificatesUpdateFailures.WithLabelValues(certificateName).Inc()
 			} else {
+				certmetrics.CertificatesUpdatedOnDisk.WithLabelValues(certificateName).Set(1)
 				logger.Infof("Certificate %s updated!", certificateName)
 			}
 		}
