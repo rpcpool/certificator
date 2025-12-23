@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    name: Build and Publish
+    name: Test
     runs-on: ubuntu-latest
 
     permissions:
