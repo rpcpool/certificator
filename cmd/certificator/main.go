@@ -12,8 +12,7 @@ import (
 )
 
 var (
-	version = "dev"  // GoReleaser will inject the Git tag here
-	commit  = "none" // GoReleaser will inject the SHA here
+	version = "dev" // GoReleaser will inject the Git tag here
 )
 
 func main() {
@@ -26,7 +25,7 @@ func main() {
 	legoLog.Logger = logger
 
 	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
-	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushAddress)
+	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
 		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)

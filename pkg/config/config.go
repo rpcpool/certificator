@@ -36,7 +36,7 @@ type Log struct {
 
 type Metrics struct {
 	ListenAddress string `envconfig:"METRICS_LISTEN_ADDRESS"`
-	PushAddress   string `envconfig:"METRICS_PUSH_ADDRESS"`
+	PushUrl       string `envconfig:"METRICS_PUSH_URL"`
 }
 
 // Config contains all configuration parameters
