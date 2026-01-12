@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"runtime/debug"
 	"strings"
 	"time"
 
@@ -42,7 +41,6 @@ type Metrics struct {
 
 // Config contains all configuration parameters
 type Config struct {
-	Version         string
 	Hostname        string
 	Acme            Acme
 	Vault           Vault
@@ -64,24 +62,12 @@ type Certificatee struct {
 
 // LoadConfig loads configuration options to  variable
 func LoadConfig() (Config, error) {
-	// Get version from runtime build info
-	version := "unknown"
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range bi.Settings {
-			if s.Key == "vcs.revision" {
-				version = s.Value
-				break
-			}
-		}
-	}
-
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
 
 	cfg := Config{
-		Version:  version,
 		Hostname: hostname,
 		Log: Log{
 			Logger: logrus.New(),
