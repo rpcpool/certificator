@@ -1,13 +1,14 @@
 package certmetrics
 
 import (
+	"bytes"
 	"net/http"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/client_golang/prometheus/push"
+	"github.com/prometheus/common/expfmt"
 	"github.com/sirupsen/logrus"
 )
 
@@ -63,14 +64,32 @@ func StartMetricsServer(logger *logrus.Logger, address string) {
 	}()
 }
 
-func PushMetrics(logger *logrus.Logger, pushAddress string) {
-	if pushAddress == "" {
-		logger.Debug("metrics push address is empty, skipping metrics push")
+func PushMetrics(logger *logrus.Logger, pushUrl string) {
+	if pushUrl == "" {
+		logger.Debug("metrics push url is empty, skipping metrics push")
 		return
 	}
 
-	logger.Infof("pushing metrics to %s", pushAddress)
-	if err := push.New(pushAddress, "certificator").Gatherer(prometheus.DefaultGatherer).Push(); err != nil {
-		logger.Errorf("could not push metrics: %v", err)
+	mts, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		logger.Errorf("could not gather metrics: %v", err)
+		return
 	}
+
+	buf := &bytes.Buffer{}
+	enc := expfmt.NewEncoder(buf, expfmt.FmtText)
+	for _, mt := range mts {
+		if err := enc.Encode(mt); err != nil {
+			logger.Errorf("could not encode metric family %s: %v", mt.GetName(), err)
+			return
+		}
+	}
+
+	logger.Infof("pushing metrics to %s", pushUrl)
+	resp, err := http.Post(pushUrl, "text/plain", buf)
+	if err != nil {
+		logger.Errorf("could not push metrics: %v", err)
+		return
+	}
+	defer resp.Body.Close()
 }
