@@ -48,6 +48,7 @@ kos:
   - id: certificator
     build: certificator
     base_import_paths: true
+    base_image: gcr.io/distroless/static-debian13:latest
     tags:
       - latest
       - "{{.Tag}}"
@@ -55,6 +56,7 @@ kos:
   - id: certificatee
     build: certificatee
     base_import_paths: true
+    base_image: gcr.io/distroless/static-debian13:latest
     tags:
       - latest
       - "{{.Tag}}"
