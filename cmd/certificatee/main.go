@@ -18,6 +18,11 @@ import (
 	"github.com/vinted/certificator/pkg/vault"
 )
 
+var (
+	version = "dev"  // GoReleaser will inject the Git tag here
+	commit  = "none" // GoReleaser will inject the SHA here
+)
+
 func main() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -39,8 +44,8 @@ func main() {
 	ticker := time.NewTicker(cfg.Certificatee.UpdateInterval)
 	defer ticker.Stop()
 
-	certmetrics.Up.WithLabelValues("certificator", cfg.Version, cfg.Hostname, cfg.Environment).Set(1)
-	defer certmetrics.Up.WithLabelValues("certificator", cfg.Version, cfg.Hostname, cfg.Environment).Set(0)
+	certmetrics.Up.WithLabelValues("certificator", version, cfg.Hostname, cfg.Environment).Set(1)
+	defer certmetrics.Up.WithLabelValues("certificator", version, cfg.Hostname, cfg.Environment).Set(0)
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient); err != nil {
