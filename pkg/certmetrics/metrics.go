@@ -117,10 +117,10 @@ func PushMetrics(logger *logrus.Logger, pushUrl string) {
 	}
 
 	logger.Infof("pushing metrics to %s", pushUrl)
-	resp, err := http.Post(pushUrl, "text/plain", buf)
+	resp, err := http.Post(pushUrl, "text/plain", buf) //nolint:gosec // URL is from trusted configuration
 	if err != nil {
 		logger.Errorf("could not push metrics: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 }

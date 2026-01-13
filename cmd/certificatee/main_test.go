@@ -235,6 +235,7 @@ BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
 aWRnaXRzIFB0eSBMdGQwHhcNMTExMjMxMDg1OTQ0WhcNMTIxMjMwMDg1OTQ0WjBF
 -----END CERTIFICATE-----`
 
+	//nolint:gosec // This is a test key, not a real credential
 	key := `-----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEA0m59l2u9iDnMbrXHfqkOrn2dVQ3vfBJqcDuFUK03d+1PZGbV
 -----END RSA PRIVATE KEY-----`
@@ -296,7 +297,9 @@ func TestFormatSerialWithRandomSerial(t *testing.T) {
 
 	// Verify all characters are valid hex
 	for _, c := range result {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		isDigit := c >= '0' && c <= '9'
+		isHexLetter := c >= 'a' && c <= 'f'
+		if !isDigit && !isHexLetter {
 			t.Errorf("formatSerial returned invalid hex character: %c", c)
 		}
 	}

@@ -520,10 +520,10 @@ func (m *mockHAProxyServer) serve() {
 }
 
 func (m *mockHAProxyServer) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set a read deadline to prevent hanging
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
 	reader := bufio.NewReader(conn)
 
@@ -542,7 +542,7 @@ func (m *mockHAProxyServer) handleConnection(conn net.Conn) {
 		fullCmd.WriteString(firstLine)
 
 		// Read all remaining data with a short timeout
-		conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -564,7 +564,7 @@ func (m *mockHAProxyServer) handleConnection(conn net.Conn) {
 		}
 	}
 
-	conn.Write([]byte(response))
+	_, _ = conn.Write([]byte(response))
 }
 
 func (m *mockHAProxyServer) Addr() string {
@@ -572,7 +572,7 @@ func (m *mockHAProxyServer) Addr() string {
 }
 
 func (m *mockHAProxyServer) Close() {
-	m.listener.Close()
+	_ = m.listener.Close()
 }
 
 func (m *mockHAProxyServer) SetResponse(commandPrefix, response string) {

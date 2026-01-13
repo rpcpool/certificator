@@ -361,9 +361,7 @@ func parseSANs(s string) []string {
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		// Remove DNS: prefix if present
-		if strings.HasPrefix(part, "DNS:") {
-			part = strings.TrimPrefix(part, "DNS:")
-		}
+		part = strings.TrimPrefix(part, "DNS:")
 		if part != "" {
 			sans = append(sans, part)
 		}
