@@ -926,11 +926,241 @@ func TestConnectionError(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	// Reduce timeout for faster test
+	// Reduce timeout and disable retries for faster test
 	client.timeout = 100 * time.Millisecond
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries: 0,
+		BaseDelay:  10 * time.Millisecond,
+		MaxDelay:   50 * time.Millisecond,
+	})
 
 	_, err = client.ListCertificates()
 	if err == nil {
 		t.Error("ListCertificates() expected connection error, got nil")
+	}
+}
+
+// =============================================================================
+// Retry Logic Tests
+// =============================================================================
+
+func TestDefaultRetryConfig(t *testing.T) {
+	config := DefaultRetryConfig()
+
+	if config.MaxRetries != DefaultMaxRetries {
+		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, DefaultMaxRetries)
+	}
+	if config.BaseDelay != DefaultRetryBaseDelay {
+		t.Errorf("BaseDelay = %v, want %v", config.BaseDelay, DefaultRetryBaseDelay)
+	}
+	if config.MaxDelay != DefaultRetryMaxDelay {
+		t.Errorf("MaxDelay = %v, want %v", config.MaxDelay, DefaultRetryMaxDelay)
+	}
+}
+
+func TestClientRetryConfig(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	client, err := NewClient("127.0.0.1:9999", logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	// Check default config is applied
+	config := client.GetRetryConfig()
+	if config.MaxRetries != DefaultMaxRetries {
+		t.Errorf("Default MaxRetries = %d, want %d", config.MaxRetries, DefaultMaxRetries)
+	}
+
+	// Set custom config
+	customConfig := RetryConfig{
+		MaxRetries: 5,
+		BaseDelay:  500 * time.Millisecond,
+		MaxDelay:   10 * time.Second,
+	}
+	client.SetRetryConfig(customConfig)
+
+	// Verify custom config
+	config = client.GetRetryConfig()
+	if config.MaxRetries != 5 {
+		t.Errorf("Custom MaxRetries = %d, want 5", config.MaxRetries)
+	}
+	if config.BaseDelay != 500*time.Millisecond {
+		t.Errorf("Custom BaseDelay = %v, want 500ms", config.BaseDelay)
+	}
+}
+
+func TestCalculateBackoff(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	client, err := NewClient("127.0.0.1:9999", logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	// Set known config for predictable testing
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries: 5,
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   30 * time.Second,
+	})
+
+	tests := []struct {
+		attempt  int
+		expected time.Duration
+	}{
+		{0, 1 * time.Second},   // 1s * 2^0 = 1s
+		{1, 2 * time.Second},   // 1s * 2^1 = 2s
+		{2, 4 * time.Second},   // 1s * 2^2 = 4s
+		{3, 8 * time.Second},   // 1s * 2^3 = 8s
+		{4, 16 * time.Second},  // 1s * 2^4 = 16s
+		{5, 30 * time.Second},  // 1s * 2^5 = 32s, capped at 30s
+		{10, 30 * time.Second}, // Capped at max
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
+			delay := client.calculateBackoff(tt.attempt)
+			if delay != tt.expected {
+				t.Errorf("calculateBackoff(%d) = %v, want %v", tt.attempt, delay, tt.expected)
+			}
+		})
+	}
+}
+
+func TestRetryOnConnectionFailure(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	// Create client pointing to non-existent server
+	client, err := NewClient("127.0.0.1:59998", logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	// Set fast retry config for testing
+	client.timeout = 50 * time.Millisecond
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries: 2,
+		BaseDelay:  10 * time.Millisecond,
+		MaxDelay:   50 * time.Millisecond,
+	})
+
+	start := time.Now()
+	_, err = client.ListCertificates()
+	elapsed := time.Since(start)
+
+	// Should fail after retries
+	if err == nil {
+		t.Error("Expected connection error, got nil")
+	}
+
+	// Should have taken some time for retries (at least 2 retries with 10ms delays)
+	if elapsed < 10*time.Millisecond {
+		t.Errorf("Retries should have taken longer, elapsed: %v", elapsed)
+	}
+
+	// Error message should mention retry attempts
+	if !strings.Contains(err.Error(), "after") {
+		t.Errorf("Error should mention retry attempts: %v", err)
+	}
+}
+
+func TestNoRetryWithZeroMaxRetries(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	// Create client pointing to non-existent server
+	client, err := NewClient("127.0.0.1:59997", logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	// Set no retries
+	client.timeout = 50 * time.Millisecond
+	client.SetRetryConfig(RetryConfig{
+		MaxRetries: 0, // No retries
+		BaseDelay:  10 * time.Millisecond,
+		MaxDelay:   50 * time.Millisecond,
+	})
+
+	start := time.Now()
+	_, err = client.ListCertificates()
+	elapsed := time.Since(start)
+
+	// Should fail immediately (no retries)
+	if err == nil {
+		t.Error("Expected connection error, got nil")
+	}
+
+	// Should be fast since no retries
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Should have failed quickly without retries, elapsed: %v", elapsed)
+	}
+}
+
+func TestRetrySucceedsOnSecondAttempt(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	// Start mock server after a delay (simulating server becoming available)
+	var mock *mockHAProxyServer
+	serverStarted := make(chan struct{})
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		mock = newMockHAProxyServer(t)
+		mock.SetResponse("show ssl cert", "/etc/haproxy/certs/test.pem\n")
+		serverStarted <- struct{}{}
+	}()
+
+	// Wait for server to start
+	<-serverStarted
+	defer mock.Close()
+
+	client, err := NewClient(mock.Addr(), logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	// Should succeed now that server is up
+	certs, err := client.ListCertificates()
+	if err != nil {
+		t.Errorf("ListCertificates() error = %v", err)
+	}
+	if len(certs) != 1 || certs[0] != "/etc/haproxy/certs/test.pem" {
+		t.Errorf("ListCertificates() = %v, want [/etc/haproxy/certs/test.pem]", certs)
+	}
+}
+
+// =============================================================================
+// Command Name Extraction Tests
+// =============================================================================
+
+func TestExtractCommandName(t *testing.T) {
+	tests := []struct {
+		command  string
+		expected string
+	}{
+		{"show ssl cert", "show ssl"},
+		{"show ssl cert /path/to/cert.pem", "show ssl"},
+		{"set ssl cert /path/to/cert.pem <<\nPEM DATA", "set ssl"},
+		{"commit ssl cert /path/to/cert.pem", "commit ssl"},
+		{"abort ssl cert /path/to/cert.pem", "abort ssl"},
+		{"show info", "show info"},
+		{"help", "help"},
+		{"", "unknown"},
+		{"   show ssl cert   ", "show ssl"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			got := extractCommandName(tt.command)
+			if got != tt.expected {
+				t.Errorf("extractCommandName(%q) = %q, want %q", tt.command, got, tt.expected)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package haproxy
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"net"
 	"regexp"
 	"strings"
@@ -10,7 +11,31 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/vinted/certificator/pkg/certmetrics"
 )
+
+// Default retry configuration
+const (
+	DefaultMaxRetries     = 3
+	DefaultRetryBaseDelay = 1 * time.Second
+	DefaultRetryMaxDelay  = 30 * time.Second
+)
+
+// RetryConfig holds retry configuration for HAProxy connections
+type RetryConfig struct {
+	MaxRetries int           // Maximum number of retry attempts (0 = no retries)
+	BaseDelay  time.Duration // Initial delay between retries
+	MaxDelay   time.Duration // Maximum delay between retries (for exponential backoff)
+}
+
+// DefaultRetryConfig returns the default retry configuration
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxRetries: DefaultMaxRetries,
+		BaseDelay:  DefaultRetryBaseDelay,
+		MaxDelay:   DefaultRetryMaxDelay,
+	}
+}
 
 // CertInfo holds certificate information parsed from HAProxy Runtime API
 type CertInfo struct {
@@ -28,10 +53,11 @@ type CertInfo struct {
 
 // Client is a HAProxy Runtime API client
 type Client struct {
-	endpoint string
-	network  string // "unix" or "tcp"
-	timeout  time.Duration
-	logger   *logrus.Logger
+	endpoint    string
+	network     string // "unix" or "tcp"
+	timeout     time.Duration
+	logger      *logrus.Logger
+	retryConfig RetryConfig
 }
 
 // NewClient creates a new HAProxy Runtime API client from an endpoint string
@@ -49,10 +75,11 @@ func NewClient(endpoint string, logger *logrus.Logger) (*Client, error) {
 	}
 
 	return &Client{
-		endpoint: endpoint,
-		network:  network,
-		timeout:  30 * time.Second,
-		logger:   logger,
+		endpoint:    endpoint,
+		network:     network,
+		timeout:     30 * time.Second,
+		logger:      logger,
+		retryConfig: DefaultRetryConfig(),
 	}, nil
 }
 
@@ -87,22 +114,87 @@ func (c *Client) Endpoint() string {
 	return c.endpoint
 }
 
-// dial establishes a connection to HAProxy Runtime API
-func (c *Client) dial() (net.Conn, error) {
-	conn, err := net.DialTimeout(c.network, c.endpoint, c.timeout)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to connect to HAProxy at %s", c.endpoint)
+// SetRetryConfig sets the retry configuration for this client
+func (c *Client) SetRetryConfig(config RetryConfig) {
+	c.retryConfig = config
+}
+
+// GetRetryConfig returns the current retry configuration
+func (c *Client) GetRetryConfig() RetryConfig {
+	return c.retryConfig
+}
+
+// calculateBackoff calculates the delay for the given retry attempt using exponential backoff
+func (c *Client) calculateBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return c.retryConfig.BaseDelay
 	}
-	return conn, nil
+
+	// Exponential backoff: baseDelay * 2^attempt
+	delay := float64(c.retryConfig.BaseDelay) * math.Pow(2, float64(attempt))
+
+	// Cap at max delay
+	if delay > float64(c.retryConfig.MaxDelay) {
+		delay = float64(c.retryConfig.MaxDelay)
+	}
+
+	return time.Duration(delay)
+}
+
+// dial establishes a connection to HAProxy Runtime API with retry logic
+func (c *Client) dial() (net.Conn, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
+		if attempt > 0 {
+			certmetrics.HAProxyConnectionRetries.WithLabelValues(c.endpoint).Inc()
+			delay := c.calculateBackoff(attempt - 1)
+			c.logger.Debugf("Retry %d/%d for %s after %v", attempt, c.retryConfig.MaxRetries, c.endpoint, delay)
+			time.Sleep(delay)
+		}
+
+		conn, err := net.DialTimeout(c.network, c.endpoint, c.timeout)
+		if err == nil {
+			certmetrics.HAProxyConnectionsTotal.WithLabelValues(c.endpoint, "success").Inc()
+			certmetrics.HAProxyEndpointsUp.WithLabelValues(c.endpoint).Set(1)
+			if attempt > 0 {
+				c.logger.Infof("Successfully connected to %s after %d retries", c.endpoint, attempt)
+			}
+			return conn, nil
+		}
+
+		lastErr = err
+		c.logger.Debugf("Connection attempt %d failed for %s: %v", attempt+1, c.endpoint, err)
+	}
+
+	certmetrics.HAProxyConnectionsTotal.WithLabelValues(c.endpoint, "failure").Inc()
+	certmetrics.HAProxyEndpointsUp.WithLabelValues(c.endpoint).Set(0)
+	return nil, errors.Wrapf(lastErr, "failed to connect to HAProxy at %s after %d attempts", c.endpoint, c.retryConfig.MaxRetries+1)
+}
+
+// extractCommandName extracts the command name for metrics labeling
+func extractCommandName(command string) string {
+	// Extract first two words of command for labeling (e.g., "show ssl", "set ssl", "commit ssl")
+	parts := strings.Fields(strings.TrimSpace(command))
+	if len(parts) >= 2 {
+		return parts[0] + " " + parts[1]
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "unknown"
 }
 
 // execute sends a command to HAProxy Runtime API and returns the response
 func (c *Client) execute(command string) (string, error) {
+	start := time.Now()
+	cmdName := extractCommandName(command)
+
 	conn, err := c.dial()
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set read/write deadline
 	if err := conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
@@ -130,6 +222,9 @@ func (c *Client) execute(command string) (string, error) {
 	if err := scanner.Err(); err != nil {
 		return "", errors.Wrap(err, "failed to read response")
 	}
+
+	// Record command duration
+	certmetrics.HAProxyCommandDuration.WithLabelValues(c.endpoint, cmdName).Observe(time.Since(start).Seconds())
 
 	return response.String(), nil
 }

@@ -93,8 +93,14 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	// Get list of certificates from HAProxy
 	certPaths, err := haproxyClient.ListCertificates()
 	if err != nil {
+		certmetrics.HAProxyEndpointsUp.WithLabelValues(endpoint).Set(0)
 		return fmt.Errorf("failed to list certificates: %w", err)
 	}
+
+	// Mark endpoint as up and record check timestamp
+	certmetrics.HAProxyEndpointsUp.WithLabelValues(endpoint).Set(1)
+	certmetrics.HAProxyLastCheckTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
+	certmetrics.HAProxyCertificatesChecked.WithLabelValues(endpoint).Add(float64(len(certPaths)))
 
 	logger.Infof("[%s] %d certificates found", endpoint, len(certPaths))
 
@@ -131,6 +137,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 				certmetrics.CertificatesUpdateFailures.WithLabelValues(domain).Inc()
 			} else {
 				certmetrics.CertificatesUpdatedOnDisk.WithLabelValues(domain).Set(1)
+				certmetrics.HAProxyCertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
 				logger.Infof("[%s] Certificate %s updated successfully!", endpoint, certPath)
 			}
 		} else {

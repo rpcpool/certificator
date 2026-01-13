@@ -42,6 +42,37 @@ var (
 		Name: "certificatee_certificates_update_failures_total",
 		Help: "Total number of certificate update failures by Certificatee",
 	}, []string{"domain"})
+
+	// HAProxy-specific metrics
+	HAProxyConnectionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_haproxy_connections_total",
+		Help: "Total number of HAProxy connection attempts",
+	}, []string{"endpoint", "status"})
+	HAProxyConnectionRetries = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_haproxy_connection_retries_total",
+		Help: "Total number of HAProxy connection retries",
+	}, []string{"endpoint"})
+	HAProxyCertificatesUpdated = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_haproxy_certificates_updated_total",
+		Help: "Total number of certificates updated in HAProxy",
+	}, []string{"endpoint", "domain"})
+	HAProxyCertificatesChecked = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_haproxy_certificates_checked_total",
+		Help: "Total number of certificates checked in HAProxy",
+	}, []string{"endpoint"})
+	HAProxyEndpointsUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_haproxy_endpoint_up",
+		Help: "Indicates if HAProxy endpoint is reachable (1 = up, 0 = down)",
+	}, []string{"endpoint"})
+	HAProxyLastCheckTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_haproxy_last_check_timestamp_seconds",
+		Help: "Unix timestamp of the last successful certificate check",
+	}, []string{"endpoint"})
+	HAProxyCommandDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "certificatee_haproxy_command_duration_seconds",
+		Help:    "Duration of HAProxy Runtime API commands",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+	}, []string{"endpoint", "command"})
 )
 
 func StartMetricsServer(logger *logrus.Logger, address string) {
