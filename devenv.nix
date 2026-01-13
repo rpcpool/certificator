@@ -1,0 +1,147 @@
+{ pkgs, lib, config, inputs, ... }:
+
+let
+  # Read Go version from go.mod automatically
+  goModContent = builtins.readFile ./go.mod;
+  goVersionLine = lib.findFirst 
+    (line: lib.hasPrefix "go " line) 
+    "go 1.24" 
+    (lib.splitString "\n" goModContent);
+  goVersion = lib.removePrefix "go " (lib.trim goVersionLine);
+in
+{
+  env = {
+    CGO_ENABLED = "0";
+    # Use the Go version from go.mod via GOTOOLCHAIN
+    # This allows the Go toolchain to download the exact version if needed
+    GOTOOLCHAIN = lib.mkForce "go${goVersion}+auto";
+  };
+
+  packages = with pkgs; [
+    git
+    go-tools        # staticcheck, etc.
+    gotools         # goimports, godoc, etc.
+    golangci-lint   # Comprehensive linter
+    delve           # Debugger
+    gopls           # Language server
+    gomodifytags    # Modify struct tags
+    impl            # Generate interface stubs
+    gotests         # Generate tests
+    gocover-cobertura # Coverage reports
+    goreleaser      # Release automation
+    gotestsum       # Better test output
+    jq              # JSON processing
+    yq              # YAML processing
+    curl            # HTTP client
+    socat           # Socket testing (useful for HAProxy runtime API testing)
+  ];
+
+  languages.go = {
+    enable = true;
+  };
+
+  scripts = {
+    build.exec = ''
+      echo "Building certificator..."
+      go build -v ./cmd/certificator
+      go build -v ./cmd/certificatee
+      echo "Build complete!"
+    '';
+
+    test.exec = ''
+      echo "Running tests..."
+      go test -v ./...
+    '';
+
+    test-coverage.exec = ''
+      echo "Running tests with coverage..."
+      go test -v -coverprofile=coverage.out ./...
+      go tool cover -html=coverage.out -o coverage.html
+      echo "Coverage report: coverage.html"
+    '';
+
+    tidy.exec = ''
+      echo "Tidying dependencies..."
+      go mod tidy
+      go mod verify
+    '';
+
+    # Run all checks (format, lint, vet, test)
+    check.exec = ''
+      echo "=== Running all checks ==="
+      echo ""
+      echo ">>> Formatting..."
+      gofmt -w -s .
+      goimports -w .
+      echo ""
+      echo ">>> Running go vet..."
+      go vet ./...
+      echo ""
+      echo ">>> Running golangci-lint..."
+      golangci-lint run ./...
+      echo ""
+      echo ">>> Running tests..."
+      go test -v ./...
+      echo ""
+      echo "=== All checks passed! ==="
+    '';
+
+    # Generate test stubs for a file
+    generate-tests.exec = ''
+      if [ -z "$1" ]; then
+        echo "Usage: generate-tests <file.go>"
+        exit 1
+      fi
+      gotests -all -w "$1"
+    '';
+
+    # Watch tests (requires watchexec)
+    test-watch.exec = ''
+      echo "Watching for changes and running tests..."
+      ${lib.getExe pkgs.watchexec} -e go -- go test -v ./...
+    '';
+
+    # Clean build artifacts
+    clean.exec = ''
+      echo "Cleaning build artifacts..."
+      rm -f certificator certificatee
+      rm -f coverage.out coverage.html
+      go clean -cache -testcache
+      echo "Clean complete!"
+    '';
+  };
+
+  # Shell hook - runs when entering the devenv
+  enterShell = ''
+    echo ""
+    echo "=========================================="
+    echo "  Certificator Development Environment"
+    echo "=========================================="
+    echo ""
+    echo "Go version (from go.mod): ${goVersion}"
+    echo "Go version (active):      $(go version | cut -d' ' -f3)"
+    echo ""
+    echo "Available commands:"
+    echo "  build          - Build certificator and certificatee"
+    echo "  test           - Run all tests"
+    echo "  test-coverage  - Run tests with coverage report"
+    echo "  test-watch     - Watch for changes and run tests"
+    echo "  tidy           - Tidy go.mod dependencies"
+    echo "  check          - Run all checks (fmt, vet, lint, test)"
+    echo "  clean          - Clean build artifacts"
+    echo ""
+  '';
+
+  # Test configuration for `devenv test`
+  enterTest = ''
+    echo "Running devenv tests..."
+    go version
+    go test -v ./...
+  '';
+
+  git-hooks.hooks = {
+    gofmt.enable = true;
+    govet.enable = true;
+    staticcheck.enable = true;
+  };
+}

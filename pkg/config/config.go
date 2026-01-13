@@ -55,9 +55,12 @@ type Config struct {
 
 // Configuration values specific to the certificatee tool
 type Certificatee struct {
-	CertificatePath      string        `envconfig:"CERTIFICATEE_CERTIFICATE_PATH" default:""`
-	CertificateExtension string        `envconfig:"CERTIFICATEE_CERTIFICATE_EXTENSION" default:""`
-	UpdateInterval       time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"24h"`
+	UpdateInterval  time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"24h"`
+	RenewBeforeDays int           `envconfig:"CERTIFICATEE_RENEW_BEFORE_DAYS" default:"30"`
+	// HAProxyEndpoints is a comma-separated list of HAProxy endpoints
+	// Each endpoint can be either a Unix socket path (starting with /) or a TCP address (host:port)
+	// Example: "/var/run/haproxy1.sock,/var/run/haproxy2.sock,192.168.1.10:9999"
+	HAProxyEndpoints []string `envconfig:"HAPROXY_ENDPOINTS" default:""`
 }
 
 // LoadConfig loads configuration options to  variable
