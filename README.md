@@ -14,7 +14,7 @@ The main certificate issuing tool that manages certificates through ACME (Let's 
 
 ### Certificatee
 
-A tool that synchronizes certificates from Vault to HAProxy using the HAProxy Runtime API. It monitors certificates loaded in HAProxy and updates them when:
+A tool that synchronizes certificates from Vault to HAProxy using the HAProxy Data Plane API. It monitors certificates loaded in HAProxy and updates them when:
 - The certificate is expiring within the configured threshold (default: 30 days)
 - The certificate serial number differs from the one stored in Vault
 
@@ -24,7 +24,10 @@ A tool that synchronizes certificates from Vault to HAProxy using the HAProxy Ru
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HAPROXY_ENDPOINTS` | (required) | Comma-separated list of HAProxy endpoints. Each can be a Unix socket path (starting with `/`) or TCP address (`host:port`). Example: `/var/run/haproxy1.sock,/var/run/haproxy2.sock,192.168.1.10:9999` |
+| `HAPROXY_DATAPLANE_API_URLS` | (required) | Comma-separated list of HAProxy Data Plane API URLs. Example: `http://haproxy1:5555,http://haproxy2:5555` |
+| `HAPROXY_DATAPLANE_API_USER` | (required) | Username for HAProxy Data Plane API authentication |
+| `HAPROXY_DATAPLANE_API_PASSWORD` | (required) | Password for HAProxy Data Plane API authentication |
+| `HAPROXY_DATAPLANE_API_INSECURE` | `false` | Skip TLS certificate verification for HTTPS connections |
 | `CERTIFICATEE_UPDATE_INTERVAL` | `24h` | How often to check certificates for updates |
 | `CERTIFICATEE_RENEW_BEFORE_DAYS` | `30` | Update certificates expiring within this many days |
 | `VAULT_APPROLE_ROLE_ID` | (required) | Vault AppRole Role ID |
@@ -49,25 +52,34 @@ A tool that synchronizes certificates from Vault to HAProxy using the HAProxy Ru
 | `EAB_KID` | | External Account Binding Key ID |
 | `EAB_HMAC_KEY` | | External Account Binding HMAC Key |
 
-## HAProxy Runtime API Integration
+## HAProxy Data Plane API Integration
 
-Certificatee uses the HAProxy Runtime API to update certificates at runtime without restarting HAProxy. It supports:
+Certificatee uses the HAProxy Data Plane API to update certificates at runtime without restarting HAProxy. It supports:
 
 - **Multiple endpoints**: Configure multiple HAProxy instances to update simultaneously
-- **Unix sockets and TCP**: Connect via Unix sockets (e.g., `/var/run/haproxy.sock`) or TCP (e.g., `127.0.0.1:9999`)
+- **HTTPS with optional TLS verification**: Connect securely with configurable certificate verification
+- **Basic authentication**: Authenticate using username/password credentials
 - **Automatic retries**: Connections are retried with exponential backoff (default: 3 retries, 1-30s delays)
 - **Graceful degradation**: If one HAProxy instance is unreachable, the tool continues updating reachable instances
-- **Runtime updates**: Certificates are updated using `set ssl cert` and `commit ssl cert` commands
+- **REST API**: Certificates are managed via the `/v3/services/haproxy/runtime/certs` endpoints
 
-### HAProxy Configuration
+### HAProxy Data Plane API Configuration
 
-Enable the Runtime API in HAProxy:
+The HAProxy Data Plane API must be installed and configured separately. See the [HAProxy Data Plane API documentation](https://www.haproxy.com/documentation/dataplaneapi/latest/) for installation instructions.
 
-```haproxy
-global
-    stats socket /var/run/haproxy.sock mode 660 level admin expose-fd listeners
-    # Or for TCP access:
-    stats socket ipv4@127.0.0.1:9999 level admin
+Example Data Plane API configuration (`dataplaneapi.yaml`):
+
+```yaml
+dataplaneapi:
+  host: 0.0.0.0
+  port: 5555
+  user:
+    - name: admin
+      password: your-secure-password
+      insecure: false
+  haproxy:
+    config_file: /etc/haproxy/haproxy.cfg
+    haproxy_bin: /usr/sbin/haproxy
 ```
 
 Certificate files must be named after the domain (e.g., `/etc/haproxy/certs/example.com.pem`).
@@ -94,7 +106,7 @@ Certificatee exposes Prometheus metrics for monitoring:
 | `certificatee_haproxy_certificates_checked_total` | Counter | endpoint | Certificates checked per endpoint |
 | `certificatee_haproxy_certificates_updated_total` | Counter | endpoint, domain | Certificates updated per endpoint/domain |
 | `certificatee_haproxy_last_check_timestamp_seconds` | Gauge | endpoint | Unix timestamp of last successful check |
-| `certificatee_haproxy_command_duration_seconds` | Histogram | endpoint, command | Duration of HAProxy Runtime API commands |
+| `certificatee_haproxy_command_duration_seconds` | Histogram | endpoint, command | Duration of HAProxy Data Plane API requests |
 
 Not an exhaustive list; refer to the source code for all metrics.
 
@@ -148,10 +160,10 @@ flowchart TB
     LE -->|Issues certs| Certificator
     Certificator -->|Stores certs| Vault
     Vault -->|Reads certs| Certificatee
-    Certificatee -->|Runtime API| HAProxy1
-    Certificatee -->|Runtime API| HAProxy2
-    Certificatee -->|Runtime API| HAProxy3
-    Certificatee -.->|Runtime API| HAProxyN
+    Certificatee -->|Data Plane API| HAProxy1
+    Certificatee -->|Data Plane API| HAProxy2
+    Certificatee -->|Data Plane API| HAProxy3
+    Certificatee -.->|Data Plane API| HAProxyN
 ```
 
 ## License

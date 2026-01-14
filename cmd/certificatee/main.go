@@ -29,9 +29,9 @@ func main() {
 	logger := cfg.Log.Logger
 	legoLog.Logger = logger
 
-	// Validate HAProxy configuration
-	if len(cfg.Certificatee.HAProxyEndpoints) == 0 {
-		logger.Fatal("HAPROXY_ENDPOINTS must be set (comma-separated list of socket paths or TCP addresses)")
+	// Validate HAProxy Data Plane API configuration
+	if len(cfg.Certificatee.HAProxyDataPlaneAPIURLs) == 0 {
+		logger.Fatal("HAPROXY_DATAPLANE_API_URLS must be set (comma-separated list of Data Plane API URLs)")
 	}
 
 	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
@@ -43,7 +43,18 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	haproxyClients, err := haproxy.NewClients(cfg.Certificatee.HAProxyEndpoints, logger)
+	// Create HAProxy Data Plane API client configurations
+	var clientConfigs []haproxy.ClientConfig
+	for _, url := range cfg.Certificatee.HAProxyDataPlaneAPIURLs {
+		clientConfigs = append(clientConfigs, haproxy.ClientConfig{
+			BaseURL:            url,
+			Username:           cfg.Certificatee.HAProxyDataPlaneAPIUser,
+			Password:           cfg.Certificatee.HAProxyDataPlaneAPIPassword,
+			InsecureSkipVerify: cfg.Certificatee.HAProxyDataPlaneAPIInsecure,
+		})
+	}
+
+	haproxyClients, err := haproxy.NewClients(clientConfigs, logger)
 	if err != nil {
 		logger.Fatal(err)
 	}

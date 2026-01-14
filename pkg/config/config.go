@@ -57,10 +57,15 @@ type Config struct {
 type Certificatee struct {
 	UpdateInterval  time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"24h"`
 	RenewBeforeDays int           `envconfig:"CERTIFICATEE_RENEW_BEFORE_DAYS" default:"30"`
-	// HAProxyEndpoints is a comma-separated list of HAProxy endpoints
-	// Each endpoint can be either a Unix socket path (starting with /) or a TCP address (host:port)
-	// Example: "/var/run/haproxy1.sock,/var/run/haproxy2.sock,192.168.1.10:9999"
-	HAProxyEndpoints []string `envconfig:"HAPROXY_ENDPOINTS" default:""`
+	// HAProxyDataPlaneAPIURLs is a comma-separated list of HAProxy Data Plane API URLs
+	// Example: "http://127.0.0.1:5555,https://haproxy2.local:5555"
+	HAProxyDataPlaneAPIURLs []string `envconfig:"HAPROXY_DATAPLANE_API_URLS" default:""`
+	// HAProxyDataPlaneAPIUser is the username for HAProxy Data Plane API basic auth
+	HAProxyDataPlaneAPIUser string `envconfig:"HAPROXY_DATAPLANE_API_USER" default:""`
+	// HAProxyDataPlaneAPIPassword is the password for HAProxy Data Plane API basic auth
+	HAProxyDataPlaneAPIPassword string `envconfig:"HAPROXY_DATAPLANE_API_PASSWORD" default:""`
+	// HAProxyDataPlaneAPIInsecure skips TLS certificate verification (not recommended for production)
+	HAProxyDataPlaneAPIInsecure bool `envconfig:"HAPROXY_DATAPLANE_API_INSECURE" default:"false"`
 }
 
 // LoadConfig loads configuration options to  variable

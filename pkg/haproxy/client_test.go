@@ -1,233 +1,17 @@
 package haproxy
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
-	"net"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
-
-// =============================================================================
-// Unit Tests for Parsing Functions
-// =============================================================================
-
-func TestParseCertInfo(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     string
-		wantErr   bool
-		checkFunc func(t *testing.T, info *CertInfo)
-	}{
-		{
-			name: "valid complete response",
-			input: `Filename: /etc/haproxy/certs/example.com.pem
-Status: Used
-Serial: 1F5202E02083861B302FFA09045721F07C865EFD
-notBefore: Aug 12 17:05:34 2020 GMT
-notAfter: Aug 12 17:05:34 2021 GMT
-Subject Alternative Name: DNS:example.com, DNS:www.example.com
-Algorithm: RSA2048
-SHA1 FingerPrint: C2958E4ABDF89447BF0BEDEF43A1A202213B7B4C
-Subject: /C=US/ST=Ohio/L=Columbus/O=Company/CN=example.local
-Issuer: /C=US/O=Let's Encrypt/CN=R3`,
-			wantErr: false,
-			checkFunc: func(t *testing.T, info *CertInfo) {
-				if info.Filename != "/etc/haproxy/certs/example.com.pem" {
-					t.Errorf("Filename = %q, want %q", info.Filename, "/etc/haproxy/certs/example.com.pem")
-				}
-				if info.Status != "Used" {
-					t.Errorf("Status = %q, want %q", info.Status, "Used")
-				}
-				if info.Serial != "1F5202E02083861B302FFA09045721F07C865EFD" {
-					t.Errorf("Serial = %q, want %q", info.Serial, "1F5202E02083861B302FFA09045721F07C865EFD")
-				}
-				if info.Algorithm != "RSA2048" {
-					t.Errorf("Algorithm = %q, want %q", info.Algorithm, "RSA2048")
-				}
-				if len(info.SANs) != 2 {
-					t.Errorf("SANs length = %d, want 2", len(info.SANs))
-				}
-				if info.NotAfter.Year() != 2021 {
-					t.Errorf("NotAfter year = %d, want 2021", info.NotAfter.Year())
-				}
-			},
-		},
-		{
-			name: "minimal valid response",
-			input: `Filename: /etc/haproxy/certs/site.pem
-Serial: ABC123`,
-			wantErr: false,
-			checkFunc: func(t *testing.T, info *CertInfo) {
-				if info.Filename != "/etc/haproxy/certs/site.pem" {
-					t.Errorf("Filename = %q, want %q", info.Filename, "/etc/haproxy/certs/site.pem")
-				}
-				if info.Serial != "ABC123" {
-					t.Errorf("Serial = %q, want %q", info.Serial, "ABC123")
-				}
-			},
-		},
-		{
-			name:    "empty response",
-			input:   "",
-			wantErr: true,
-		},
-		{
-			name:    "no filename or serial",
-			input:   "Status: Used\nAlgorithm: RSA2048",
-			wantErr: true,
-		},
-		{
-			name: "response with extra whitespace",
-			input: `  Filename:   /etc/haproxy/certs/site.pem  
-  Serial:   ABC123  `,
-			wantErr: false,
-			checkFunc: func(t *testing.T, info *CertInfo) {
-				if info.Filename != "/etc/haproxy/certs/site.pem" {
-					t.Errorf("Filename = %q, want %q", info.Filename, "/etc/haproxy/certs/site.pem")
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			info, err := parseCertInfo(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseCertInfo() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && tt.checkFunc != nil {
-				tt.checkFunc(t, info)
-			}
-		})
-	}
-}
-
-func TestParseHAProxyTime(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		wantErr bool
-		check   func(t *testing.T, tm time.Time)
-	}{
-		{
-			name:    "double digit day",
-			input:   "Aug 12 17:05:34 2020 GMT",
-			wantErr: false,
-			check: func(t *testing.T, tm time.Time) {
-				if tm.Day() != 12 || tm.Month() != time.August || tm.Year() != 2020 {
-					t.Errorf("got %v, want Aug 12 2020", tm)
-				}
-			},
-		},
-		{
-			name:    "single digit day",
-			input:   "Aug 2 17:05:34 2020 GMT",
-			wantErr: false,
-			check: func(t *testing.T, tm time.Time) {
-				if tm.Day() != 2 {
-					t.Errorf("Day = %d, want 2", tm.Day())
-				}
-			},
-		},
-		{
-			name:    "january date",
-			input:   "Jan 15 00:00:00 2025 GMT",
-			wantErr: false,
-			check: func(t *testing.T, tm time.Time) {
-				if tm.Month() != time.January || tm.Year() != 2025 {
-					t.Errorf("got %v, want Jan 2025", tm)
-				}
-			},
-		},
-		{
-			name:    "invalid format",
-			input:   "2020-08-12T17:05:34Z",
-			wantErr: true,
-		},
-		{
-			name:    "empty string",
-			input:   "",
-			wantErr: true,
-		},
-		{
-			name:    "garbage",
-			input:   "not a date",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tm, err := parseHAProxyTime(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseHAProxyTime(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && tt.check != nil {
-				tt.check(t, tm)
-			}
-		})
-	}
-}
-
-func TestParseSANs(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  []string
-	}{
-		{
-			name:  "multiple SANs with DNS prefix",
-			input: "DNS:example.com, DNS:www.example.com",
-			want:  []string{"example.com", "www.example.com"},
-		},
-		{
-			name:  "single SAN",
-			input: "DNS:example.com",
-			want:  []string{"example.com"},
-		},
-		{
-			name:  "empty string",
-			input: "",
-			want:  nil,
-		},
-		{
-			name:  "without DNS prefix",
-			input: "example.com, www.example.com",
-			want:  []string{"example.com", "www.example.com"},
-		},
-		{
-			name:  "mixed with and without prefix",
-			input: "DNS:example.com, www.example.com",
-			want:  []string{"example.com", "www.example.com"},
-		},
-		{
-			name:  "extra whitespace",
-			input: "  DNS:example.com  ,   DNS:www.example.com  ",
-			want:  []string{"example.com", "www.example.com"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseSANs(tt.input)
-			if len(got) != len(tt.want) {
-				t.Errorf("parseSANs(%q) = %v, want %v", tt.input, got, tt.want)
-				return
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("parseSANs(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
 
 // =============================================================================
 // Unit Tests for Helper Functions
@@ -350,6 +134,79 @@ func TestNormalizeSerial(t *testing.T) {
 	}
 }
 
+func TestParseDataPlaneAPITime(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+		check   func(t *testing.T, tm time.Time)
+	}{
+		{
+			name:    "RFC3339 format",
+			input:   "2024-08-12T17:05:34Z",
+			wantErr: false,
+			check: func(t *testing.T, tm time.Time) {
+				if tm.Day() != 12 || tm.Month() != time.August || tm.Year() != 2024 {
+					t.Errorf("got %v, want Aug 12 2024", tm)
+				}
+			},
+		},
+		{
+			name:    "RFC3339 without T",
+			input:   "2025-01-15T00:00:00Z",
+			wantErr: false,
+			check: func(t *testing.T, tm time.Time) {
+				if tm.Month() != time.January || tm.Year() != 2025 {
+					t.Errorf("got %v, want Jan 2025", tm)
+				}
+			},
+		},
+		{
+			name:    "HAProxy format double digit day",
+			input:   "Aug 12 17:05:34 2020 GMT",
+			wantErr: false,
+			check: func(t *testing.T, tm time.Time) {
+				if tm.Day() != 12 || tm.Month() != time.August || tm.Year() != 2020 {
+					t.Errorf("got %v, want Aug 12 2020", tm)
+				}
+			},
+		},
+		{
+			name:    "HAProxy format single digit day padded",
+			input:   "Aug 02 17:05:34 2020 GMT",
+			wantErr: false,
+			check: func(t *testing.T, tm time.Time) {
+				if tm.Day() != 2 {
+					t.Errorf("Day = %d, want 2", tm.Day())
+				}
+			},
+		},
+		{
+			name:    "invalid format",
+			input:   "not a date",
+			wantErr: true,
+		},
+		{
+			name:    "empty string",
+			input:   "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, err := parseDataPlaneAPITime(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseDataPlaneAPITime(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(t, tm)
+			}
+		})
+	}
+}
+
 // =============================================================================
 // Unit Tests for Client Constructors
 // =============================================================================
@@ -359,49 +216,64 @@ func TestNewClient(t *testing.T) {
 	logger.SetLevel(logrus.PanicLevel) // Suppress logs in tests
 
 	tests := []struct {
-		name        string
-		endpoint    string
-		wantErr     bool
-		wantNetwork string
+		name    string
+		config  ClientConfig
+		wantErr bool
 	}{
 		{
-			name:     "empty endpoint",
-			endpoint: "",
-			wantErr:  true,
+			name: "empty baseURL",
+			config: ClientConfig{
+				BaseURL: "",
+			},
+			wantErr: true,
 		},
 		{
-			name:        "unix socket path",
-			endpoint:    "/var/run/haproxy.sock",
-			wantErr:     false,
-			wantNetwork: "unix",
+			name: "valid http URL",
+			config: ClientConfig{
+				BaseURL:  "http://localhost:5555",
+				Username: "admin",
+				Password: "secret",
+			},
+			wantErr: false,
 		},
 		{
-			name:        "tcp address",
-			endpoint:    "127.0.0.1:9999",
-			wantErr:     false,
-			wantNetwork: "tcp",
+			name: "valid https URL",
+			config: ClientConfig{
+				BaseURL:            "https://haproxy.example.com:5555",
+				Username:           "admin",
+				Password:           "secret",
+				InsecureSkipVerify: true,
+			},
+			wantErr: false,
 		},
 		{
-			name:        "tcp address with hostname",
-			endpoint:    "haproxy.local:9999",
-			wantErr:     false,
-			wantNetwork: "tcp",
+			name: "URL with trailing slash",
+			config: ClientConfig{
+				BaseURL: "http://localhost:5555/",
+			},
+			wantErr: false,
+		},
+		{
+			name: "custom timeout",
+			config: ClientConfig{
+				BaseURL: "http://localhost:5555",
+				Timeout: 60 * time.Second,
+			},
+			wantErr: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, err := NewClient(tt.endpoint, logger)
+			client, err := NewClient(tt.config, logger)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewClient() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if !tt.wantErr {
-				if client.network != tt.wantNetwork {
-					t.Errorf("client.network = %q, want %q", client.network, tt.wantNetwork)
-				}
-				if client.endpoint != tt.endpoint {
-					t.Errorf("client.endpoint = %q, want %q", client.endpoint, tt.endpoint)
+				expectedURL := strings.TrimSuffix(tt.config.BaseURL, "/")
+				if client.baseURL != expectedURL {
+					t.Errorf("client.baseURL = %q, want %q", client.baseURL, expectedURL)
 				}
 			}
 		})
@@ -414,48 +286,61 @@ func TestNewClients(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		endpoints []string
+		configs   []ClientConfig
 		wantErr   bool
 		wantCount int
 	}{
 		{
-			name:      "empty slice",
-			endpoints: []string{},
-			wantErr:   true,
+			name:    "empty slice",
+			configs: []ClientConfig{},
+			wantErr: true,
 		},
 		{
-			name:      "nil slice",
-			endpoints: nil,
-			wantErr:   true,
+			name:    "nil slice",
+			configs: nil,
+			wantErr: true,
 		},
 		{
-			name:      "single endpoint",
-			endpoints: []string{"/var/run/haproxy.sock"},
+			name: "single endpoint",
+			configs: []ClientConfig{
+				{BaseURL: "http://localhost:5555", Username: "admin", Password: "secret"},
+			},
 			wantErr:   false,
 			wantCount: 1,
 		},
 		{
-			name:      "multiple endpoints",
-			endpoints: []string{"/var/run/haproxy1.sock", "/var/run/haproxy2.sock", "127.0.0.1:9999"},
+			name: "multiple endpoints",
+			configs: []ClientConfig{
+				{BaseURL: "http://haproxy1:5555", Username: "admin", Password: "secret"},
+				{BaseURL: "http://haproxy2:5555", Username: "admin", Password: "secret"},
+				{BaseURL: "http://haproxy3:5555", Username: "admin", Password: "secret"},
+			},
 			wantErr:   false,
 			wantCount: 3,
 		},
 		{
-			name:      "with empty strings",
-			endpoints: []string{"/var/run/haproxy.sock", "", "  ", "127.0.0.1:9999"},
+			name: "with empty baseURLs",
+			configs: []ClientConfig{
+				{BaseURL: "http://haproxy1:5555", Username: "admin", Password: "secret"},
+				{BaseURL: ""},
+				{BaseURL: "http://haproxy2:5555", Username: "admin", Password: "secret"},
+			},
 			wantErr:   false,
-			wantCount: 2, // empty strings are skipped
+			wantCount: 2, // empty baseURLs are skipped
 		},
 		{
-			name:      "only empty strings",
-			endpoints: []string{"", "  ", "   "},
-			wantErr:   true,
+			name: "only empty baseURLs",
+			configs: []ClientConfig{
+				{BaseURL: ""},
+				{BaseURL: ""},
+			},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clients, err := NewClients(tt.endpoints, logger)
+			clients, err := NewClients(tt.configs, logger)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewClients() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -471,112 +356,90 @@ func TestClientEndpoint(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	client, err := NewClient("/var/run/haproxy.sock", logger)
+	client, err := NewClient(ClientConfig{
+		BaseURL:  "http://localhost:5555",
+		Username: "admin",
+		Password: "secret",
+	}, logger)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	if got := client.Endpoint(); got != "/var/run/haproxy.sock" {
-		t.Errorf("Endpoint() = %q, want %q", got, "/var/run/haproxy.sock")
+	if got := client.Endpoint(); got != "http://localhost:5555" {
+		t.Errorf("Endpoint() = %q, want %q", got, "http://localhost:5555")
 	}
 }
 
 // =============================================================================
-// Mock HAProxy Server for Integration Tests
+// Mock HAProxy Data Plane API Server
 // =============================================================================
 
-// mockHAProxyServer simulates the HAProxy Runtime API
-type mockHAProxyServer struct {
-	listener  net.Listener
-	responses map[string]string // command prefix -> response
-	t         *testing.T
+// mockDataPlaneAPI simulates the HAProxy Data Plane API
+type mockDataPlaneAPI struct {
+	server       *httptest.Server
+	handlers     map[string]http.HandlerFunc
+	authRequired bool
+	username     string
+	password     string
+	t            *testing.T
 }
 
-// newMockHAProxyServer creates a mock server listening on a random TCP port
-func newMockHAProxyServer(t *testing.T) *mockHAProxyServer {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to create mock server: %v", err)
+// newMockDataPlaneAPI creates a mock Data Plane API server
+func newMockDataPlaneAPI(t *testing.T) *mockDataPlaneAPI {
+	m := &mockDataPlaneAPI{
+		handlers: make(map[string]http.HandlerFunc),
+		t:        t,
 	}
 
-	m := &mockHAProxyServer{
-		listener:  listener,
-		responses: make(map[string]string),
-		t:         t,
-	}
+	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check basic auth if required
+		if m.authRequired {
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != m.username || pass != m.password {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
 
-	go m.serve()
+		// Find matching handler by method + path
+		key := r.Method + " " + r.URL.Path
+		if handler, ok := m.handlers[key]; ok {
+			handler(w, r)
+			return
+		}
+
+		// Try prefix matching for dynamic paths (e.g., /v3/services/haproxy/runtime/certs/example.com.pem)
+		for pattern, handler := range m.handlers {
+			if strings.HasPrefix(key, pattern) {
+				handler(w, r)
+				return
+			}
+		}
+
+		// Default 404
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message": "not found"}`))
+	}))
+
 	return m
 }
 
-func (m *mockHAProxyServer) serve() {
-	for {
-		conn, err := m.listener.Accept()
-		if err != nil {
-			return // Server closed
-		}
-		go m.handleConnection(conn)
-	}
+func (m *mockDataPlaneAPI) URL() string {
+	return m.server.URL
 }
 
-func (m *mockHAProxyServer) handleConnection(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-
-	// Set a read deadline to prevent hanging
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-	reader := bufio.NewReader(conn)
-
-	// Read the first line to determine command type
-	firstLine, err := reader.ReadString('\n')
-	if err != nil {
-		return
-	}
-
-	var cmd string
-
-	// For "set ssl cert" commands, we need to read the multiline PEM data
-	if strings.HasPrefix(strings.TrimSpace(firstLine), "set ssl cert") {
-		// Read until we see the end marker (empty line after PEM data)
-		var fullCmd strings.Builder
-		fullCmd.WriteString(firstLine)
-
-		// Read all remaining data with a short timeout
-		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				break
-			}
-			fullCmd.WriteString(line)
-		}
-		cmd = fullCmd.String()
-	} else {
-		cmd = firstLine
-	}
-
-	// Find matching response
-	response := "Unknown command\n"
-	for prefix, resp := range m.responses {
-		if strings.HasPrefix(strings.TrimSpace(cmd), prefix) {
-			response = resp
-			break
-		}
-	}
-
-	_, _ = conn.Write([]byte(response))
+func (m *mockDataPlaneAPI) Close() {
+	m.server.Close()
 }
 
-func (m *mockHAProxyServer) Addr() string {
-	return m.listener.Addr().String()
+func (m *mockDataPlaneAPI) SetAuth(username, password string) {
+	m.authRequired = true
+	m.username = username
+	m.password = password
 }
 
-func (m *mockHAProxyServer) Close() {
-	_ = m.listener.Close()
-}
-
-func (m *mockHAProxyServer) SetResponse(commandPrefix, response string) {
-	m.responses[commandPrefix] = response
+func (m *mockDataPlaneAPI) SetHandler(method, path string, handler http.HandlerFunc) {
+	m.handlers[method+" "+path] = handler
 }
 
 // =============================================================================
@@ -584,58 +447,76 @@ func (m *mockHAProxyServer) SetResponse(commandPrefix, response string) {
 // =============================================================================
 
 func TestListCertificates(t *testing.T) {
-	mock := newMockHAProxyServer(t)
-	defer mock.Close()
-
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
 	tests := []struct {
-		name     string
-		response string
-		want     []string
-		wantErr  bool
+		name       string
+		response   []CertInfo
+		statusCode int
+		want       []string
+		wantErr    bool
 	}{
 		{
 			name: "normal response with multiple certs",
-			response: `# transaction
-*/etc/haproxy/certs/pending.pem
-# filename
-/etc/haproxy/certs/site1.pem
-/etc/haproxy/certs/site2.pem
-`,
-			want:    []string{"/etc/haproxy/certs/site1.pem", "/etc/haproxy/certs/site2.pem"},
-			wantErr: false,
+			response: []CertInfo{
+				{Filename: "/etc/haproxy/certs/site1.pem"},
+				{Filename: "/etc/haproxy/certs/site2.pem"},
+			},
+			statusCode: http.StatusOK,
+			want:       []string{"/etc/haproxy/certs/site1.pem", "/etc/haproxy/certs/site2.pem"},
+			wantErr:    false,
 		},
 		{
-			name:     "empty response",
-			response: "\n",
-			want:     nil,
-			wantErr:  false,
+			name:       "empty response",
+			response:   []CertInfo{},
+			statusCode: http.StatusOK,
+			want:       nil,
+			wantErr:    false,
 		},
 		{
-			name: "only comments and transactions",
-			response: `# comment
-*/etc/haproxy/certs/pending.pem
-# another comment
-`,
-			want:    nil,
-			wantErr: false,
+			name: "certs with storage_name instead of file",
+			response: []CertInfo{
+				{StorageName: "example.com.pem"},
+				{StorageName: "test.com.pem"},
+			},
+			statusCode: http.StatusOK,
+			want:       []string{"example.com.pem", "test.com.pem"},
+			wantErr:    false,
 		},
 		{
 			name: "single certificate",
-			response: `/etc/haproxy/certs/only.pem
-`,
-			want:    []string{"/etc/haproxy/certs/only.pem"},
-			wantErr: false,
+			response: []CertInfo{
+				{Filename: "/etc/haproxy/certs/only.pem"},
+			},
+			statusCode: http.StatusOK,
+			want:       []string{"/etc/haproxy/certs/only.pem"},
+			wantErr:    false,
+		},
+		{
+			name:       "server error",
+			response:   nil,
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mock.SetResponse("show ssl cert", tt.response)
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
 
-			client, err := NewClient(mock.Addr(), logger)
+			mock.SetHandler("GET", "/v3/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				if tt.response != nil {
+					_ = json.NewEncoder(w).Encode(tt.response)
+				} else {
+					_, _ = w.Write([]byte(`{"message": "error"}`))
+				}
+			})
+
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
 			if err != nil {
 				t.Fatalf("NewClient() error = %v", err)
 			}
@@ -660,36 +541,33 @@ func TestListCertificates(t *testing.T) {
 }
 
 func TestGetCertificateInfo(t *testing.T) {
-	mock := newMockHAProxyServer(t)
-	defer mock.Close()
-
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	validResponse := `Filename: /etc/haproxy/certs/example.com.pem
-Status: Used
-Serial: ABC123DEF456
-notBefore: Jan 1 00:00:00 2024 GMT
-notAfter: Dec 31 23:59:59 2024 GMT
-Subject Alternative Name: DNS:example.com, DNS:www.example.com
-Algorithm: RSA2048
-SHA1 FingerPrint: AABBCCDD
-Subject: /CN=example.com
-Issuer: /CN=Test CA
-`
-
 	tests := []struct {
-		name      string
-		certPath  string
-		response  string
-		wantErr   bool
-		checkFunc func(t *testing.T, info *CertInfo)
+		name       string
+		certPath   string
+		response   *CertInfo
+		statusCode int
+		wantErr    bool
+		checkFunc  func(t *testing.T, info *CertInfo)
 	}{
 		{
 			name:     "valid certificate info",
-			certPath: "/etc/haproxy/certs/example.com.pem",
-			response: validResponse,
-			wantErr:  false,
+			certPath: "example.com.pem",
+			response: &CertInfo{
+				Filename:     "/etc/haproxy/certs/example.com.pem",
+				Status:       "Used",
+				Serial:       "ABC123DEF456",
+				NotBeforeStr: "2024-01-01T00:00:00Z",
+				NotAfterStr:  "2024-12-31T23:59:59Z",
+				Subject:      "/CN=example.com",
+				Issuer:       "/CN=Test CA",
+				Algorithm:    "RSA2048",
+				SANs:         []string{"example.com", "www.example.com"},
+			},
+			statusCode: http.StatusOK,
+			wantErr:    false,
 			checkFunc: func(t *testing.T, info *CertInfo) {
 				if info.Serial != "ABC123DEF456" {
 					t.Errorf("Serial = %q, want %q", info.Serial, "ABC123DEF456")
@@ -697,21 +575,43 @@ Issuer: /CN=Test CA
 				if len(info.SANs) != 2 {
 					t.Errorf("SANs count = %d, want 2", len(info.SANs))
 				}
+				if info.NotAfter.Year() != 2024 {
+					t.Errorf("NotAfter year = %d, want 2024", info.NotAfter.Year())
+				}
 			},
 		},
 		{
-			name:     "certificate not found",
-			certPath: "/etc/haproxy/certs/notfound.pem",
-			response: "Can't display transaction for a certificate without storage.\n",
-			wantErr:  true,
+			name:       "certificate not found",
+			certPath:   "notfound.pem",
+			response:   nil,
+			statusCode: http.StatusNotFound,
+			wantErr:    true,
+		},
+		{
+			name:       "server error",
+			certPath:   "error.pem",
+			response:   nil,
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mock.SetResponse(fmt.Sprintf("show ssl cert %s", tt.certPath), tt.response)
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
 
-			client, err := NewClient(mock.Addr(), logger)
+			mock.SetHandler("GET", "/v3/services/haproxy/runtime/certs/"+tt.certPath, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.statusCode)
+				if tt.response != nil {
+					_ = json.NewEncoder(w).Encode(tt.response)
+				} else {
+					_, _ = w.Write([]byte(`{"message": "error"}`))
+				}
+			})
+
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
 			if err != nil {
 				t.Fatalf("NewClient() error = %v", err)
 			}
@@ -729,187 +629,304 @@ Issuer: /CN=Test CA
 	}
 }
 
-func TestSetCertificate(t *testing.T) {
-	mock := newMockHAProxyServer(t)
-	defer mock.Close()
-
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	tests := []struct {
-		name     string
-		certPath string
-		pemData  string
-		response string
-		wantErr  bool
-	}{
-		{
-			name:     "success - transaction created",
-			certPath: "/etc/haproxy/certs/example.com.pem",
-			pemData:  "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-			response: "Transaction created for certificate /etc/haproxy/certs/example.com.pem!\n",
-			wantErr:  false,
-		},
-		{
-			name:     "success - transaction updated",
-			certPath: "/etc/haproxy/certs/example.com.pem",
-			pemData:  "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-			response: "transaction updated for certificate /etc/haproxy/certs/example.com.pem!\n",
-			wantErr:  false,
-		},
-		{
-			name:     "error - certificate not found",
-			certPath: "/etc/haproxy/certs/notfound.pem",
-			pemData:  "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-			response: "error: certificate not found\n",
-			wantErr:  true,
-		},
-		{
-			name:     "error - unable to parse",
-			certPath: "/etc/haproxy/certs/bad.pem",
-			pemData:  "invalid pem",
-			response: "unable to parse certificate\n",
-			wantErr:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mock.SetResponse("set ssl cert", tt.response)
-
-			client, err := NewClient(mock.Addr(), logger)
-			if err != nil {
-				t.Fatalf("NewClient() error = %v", err)
-			}
-
-			err = client.SetCertificate(tt.certPath, tt.pemData)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SetCertificate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestCommitCertificate(t *testing.T) {
-	mock := newMockHAProxyServer(t)
-	defer mock.Close()
-
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	tests := []struct {
-		name     string
-		certPath string
-		response string
-		wantErr  bool
-	}{
-		{
-			name:     "success",
-			certPath: "/etc/haproxy/certs/example.com.pem",
-			response: "Committing /etc/haproxy/certs/example.com.pem\nSuccess!\n",
-			wantErr:  false,
-		},
-		{
-			name:     "error - no transaction",
-			certPath: "/etc/haproxy/certs/notfound.pem",
-			response: "error: no transaction for certificate\n",
-			wantErr:  true,
-		},
-		{
-			name:     "error - failed",
-			certPath: "/etc/haproxy/certs/bad.pem",
-			response: "failed to commit certificate\n",
-			wantErr:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mock.SetResponse("commit ssl cert", tt.response)
-
-			client, err := NewClient(mock.Addr(), logger)
-			if err != nil {
-				t.Fatalf("NewClient() error = %v", err)
-			}
-
-			err = client.CommitCertificate(tt.certPath)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("CommitCertificate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func TestUpdateCertificate(t *testing.T) {
-	mock := newMockHAProxyServer(t)
-	defer mock.Close()
-
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	t.Run("success - set and commit", func(t *testing.T) {
-		mock.SetResponse("set ssl cert", "Transaction created for certificate /etc/haproxy/certs/example.com.pem!\n")
-		mock.SetResponse("commit ssl cert", "Committing /etc/haproxy/certs/example.com.pem\nSuccess!\n")
+	tests := []struct {
+		name       string
+		certName   string
+		pemData    string
+		statusCode int
+		wantErr    bool
+	}{
+		{
+			name:       "success - certificate updated",
+			certName:   "example.com.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusOK,
+			wantErr:    false,
+		},
+		{
+			name:       "success - accepted",
+			certName:   "example.com.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusAccepted,
+			wantErr:    false,
+		},
+		{
+			name:       "error - not found",
+			certName:   "notfound.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusNotFound,
+			wantErr:    true,
+		},
+		{
+			name:       "error - bad request",
+			certName:   "bad.pem",
+			pemData:    "invalid pem",
+			statusCode: http.StatusBadRequest,
+			wantErr:    true,
+		},
+	}
 
-		client, err := NewClient(mock.Addr(), logger)
-		if err != nil {
-			t.Fatalf("NewClient() error = %v", err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
 
-		err = client.UpdateCertificate("/etc/haproxy/certs/example.com.pem", "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
-		if err != nil {
-			t.Errorf("UpdateCertificate() error = %v", err)
-		}
-	})
+			mock.SetHandler("PUT", "/v3/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+				// Verify content type is multipart
+				contentType := r.Header.Get("Content-Type")
+				if !strings.Contains(contentType, "multipart/form-data") {
+					t.Errorf("Expected multipart/form-data content type, got %s", contentType)
+				}
 
-	t.Run("failure - set fails", func(t *testing.T) {
-		mock.SetResponse("set ssl cert", "error: certificate not found\n")
+				// Read the multipart form
+				err := r.ParseMultipartForm(10 << 20) // 10 MB
+				if err != nil {
+					t.Errorf("Failed to parse multipart form: %v", err)
+				}
 
-		client, err := NewClient(mock.Addr(), logger)
-		if err != nil {
-			t.Fatalf("NewClient() error = %v", err)
-		}
+				// Verify file was uploaded
+				file, _, err := r.FormFile("file_upload")
+				if err != nil {
+					t.Errorf("Failed to get file from form: %v", err)
+				} else {
+					defer func() { _ = file.Close() }()
+					data, _ := io.ReadAll(file)
+					if string(data) != tt.pemData {
+						t.Errorf("File data = %q, want %q", string(data), tt.pemData)
+					}
+				}
 
-		err = client.UpdateCertificate("/etc/haproxy/certs/notfound.pem", "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
-		if err == nil {
-			t.Error("UpdateCertificate() expected error, got nil")
-		}
-	})
+				w.WriteHeader(tt.statusCode)
+			})
 
-	t.Run("failure - commit fails", func(t *testing.T) {
-		mock.SetResponse("set ssl cert", "Transaction created for certificate /etc/haproxy/certs/example.com.pem!\n")
-		mock.SetResponse("commit ssl cert", "failed to commit certificate\n")
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
 
-		client, err := NewClient(mock.Addr(), logger)
-		if err != nil {
-			t.Fatalf("NewClient() error = %v", err)
-		}
-
-		err = client.UpdateCertificate("/etc/haproxy/certs/example.com.pem", "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
-		if err == nil {
-			t.Error("UpdateCertificate() expected error, got nil")
-		}
-	})
+			err = client.UpdateCertificate(tt.certName, tt.pemData)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("UpdateCertificate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
 
-func TestAbortCertificate(t *testing.T) {
-	mock := newMockHAProxyServer(t)
-	defer mock.Close()
-
+func TestCreateCertificate(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	mock.SetResponse("abort ssl cert", "Transaction aborted for certificate /etc/haproxy/certs/example.com.pem!\n")
-
-	client, err := NewClient(mock.Addr(), logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+	tests := []struct {
+		name       string
+		certName   string
+		pemData    string
+		statusCode int
+		wantErr    bool
+	}{
+		{
+			name:       "success - certificate created",
+			certName:   "new.example.com.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusCreated,
+			wantErr:    false,
+		},
+		{
+			name:       "success - OK status",
+			certName:   "new.example.com.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusOK,
+			wantErr:    false,
+		},
+		{
+			name:       "error - conflict (already exists)",
+			certName:   "existing.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusConflict,
+			wantErr:    true,
+		},
+		{
+			name:       "error - bad request",
+			certName:   "bad.pem",
+			pemData:    "invalid pem",
+			statusCode: http.StatusBadRequest,
+			wantErr:    true,
+		},
 	}
 
-	err = client.AbortCertificate("/etc/haproxy/certs/example.com.pem")
-	if err != nil {
-		t.Errorf("AbortCertificate() error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
+
+			mock.SetHandler("POST", "/v3/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+				// Verify content type is multipart
+				contentType := r.Header.Get("Content-Type")
+				if !strings.Contains(contentType, "multipart/form-data") {
+					t.Errorf("Expected multipart/form-data content type, got %s", contentType)
+				}
+
+				// Read the multipart form
+				err := r.ParseMultipartForm(10 << 20) // 10 MB
+				if err != nil {
+					t.Errorf("Failed to parse multipart form: %v", err)
+				}
+
+				// Verify file was uploaded
+				file, header, err := r.FormFile("file_upload")
+				if err != nil {
+					t.Errorf("Failed to get file from form: %v", err)
+				} else {
+					defer func() { _ = file.Close() }()
+					if header.Filename != tt.certName {
+						t.Errorf("Filename = %q, want %q", header.Filename, tt.certName)
+					}
+					data, _ := io.ReadAll(file)
+					if string(data) != tt.pemData {
+						t.Errorf("File data = %q, want %q", string(data), tt.pemData)
+					}
+				}
+
+				w.WriteHeader(tt.statusCode)
+			})
+
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+
+			err = client.CreateCertificate(tt.certName, tt.pemData)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateCertificate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
+}
+
+func TestDeleteCertificate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	tests := []struct {
+		name       string
+		certName   string
+		statusCode int
+		wantErr    bool
+	}{
+		{
+			name:       "success - no content",
+			certName:   "example.com.pem",
+			statusCode: http.StatusNoContent,
+			wantErr:    false,
+		},
+		{
+			name:       "success - OK",
+			certName:   "example.com.pem",
+			statusCode: http.StatusOK,
+			wantErr:    false,
+		},
+		{
+			name:       "error - not found",
+			certName:   "notfound.pem",
+			statusCode: http.StatusNotFound,
+			wantErr:    true,
+		},
+		{
+			name:       "error - server error",
+			certName:   "error.pem",
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
+
+			mock.SetHandler("DELETE", "/v3/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			})
+
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+
+			err = client.DeleteCertificate(tt.certName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DeleteCertificate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Authentication Tests
+// =============================================================================
+
+func TestBasicAuth(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+	mock.SetAuth("admin", "secret")
+
+	mock.SetHandler("GET", "/v3/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]CertInfo{})
+	})
+
+	t.Run("valid credentials", func(t *testing.T) {
+		client, err := NewClient(ClientConfig{
+			BaseURL:  mock.URL(),
+			Username: "admin",
+			Password: "secret",
+		}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.ListCertificates()
+		if err != nil {
+			t.Errorf("ListCertificates() with valid auth error = %v", err)
+		}
+	})
+
+	t.Run("invalid credentials", func(t *testing.T) {
+		client, err := NewClient(ClientConfig{
+			BaseURL:  mock.URL(),
+			Username: "admin",
+			Password: "wrong",
+		}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.ListCertificates()
+		if err == nil {
+			t.Error("ListCertificates() with invalid auth expected error, got nil")
+		}
+	})
+
+	t.Run("no credentials", func(t *testing.T) {
+		client, err := NewClient(ClientConfig{
+			BaseURL: mock.URL(),
+		}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.ListCertificates()
+		if err == nil {
+			t.Error("ListCertificates() without auth expected error, got nil")
+		}
+	})
 }
 
 // =============================================================================
@@ -921,13 +938,15 @@ func TestConnectionError(t *testing.T) {
 	logger.SetLevel(logrus.PanicLevel)
 
 	// Create client pointing to non-existent server
-	client, err := NewClient("127.0.0.1:59999", logger)
+	client, err := NewClient(ClientConfig{
+		BaseURL: "http://127.0.0.1:59999",
+		Timeout: 100 * time.Millisecond,
+	}, logger)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	// Reduce timeout and disable retries for faster test
-	client.timeout = 100 * time.Millisecond
+	// Disable retries for faster test
 	client.SetRetryConfig(RetryConfig{
 		MaxRetries: 0,
 		BaseDelay:  10 * time.Millisecond,
@@ -962,7 +981,7 @@ func TestClientRetryConfig(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	client, err := NewClient("127.0.0.1:9999", logger)
+	client, err := NewClient(ClientConfig{BaseURL: "http://localhost:5555"}, logger)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -995,7 +1014,7 @@ func TestCalculateBackoff(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
-	client, err := NewClient("127.0.0.1:9999", logger)
+	client, err := NewClient(ClientConfig{BaseURL: "http://localhost:5555"}, logger)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -1035,13 +1054,15 @@ func TestRetryOnConnectionFailure(t *testing.T) {
 	logger.SetLevel(logrus.PanicLevel)
 
 	// Create client pointing to non-existent server
-	client, err := NewClient("127.0.0.1:59998", logger)
+	client, err := NewClient(ClientConfig{
+		BaseURL: "http://127.0.0.1:59998",
+		Timeout: 50 * time.Millisecond,
+	}, logger)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
 	// Set fast retry config for testing
-	client.timeout = 50 * time.Millisecond
 	client.SetRetryConfig(RetryConfig{
 		MaxRetries: 2,
 		BaseDelay:  10 * time.Millisecond,
@@ -1073,13 +1094,15 @@ func TestNoRetryWithZeroMaxRetries(t *testing.T) {
 	logger.SetLevel(logrus.PanicLevel)
 
 	// Create client pointing to non-existent server
-	client, err := NewClient("127.0.0.1:59997", logger)
+	client, err := NewClient(ClientConfig{
+		BaseURL: "http://127.0.0.1:59997",
+		Timeout: 50 * time.Millisecond,
+	}, logger)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
 	// Set no retries
-	client.timeout = 50 * time.Millisecond
 	client.SetRetryConfig(RetryConfig{
 		MaxRetries: 0, // No retries
 		BaseDelay:  10 * time.Millisecond,
@@ -1101,65 +1124,28 @@ func TestNoRetryWithZeroMaxRetries(t *testing.T) {
 	}
 }
 
-func TestRetrySucceedsOnSecondAttempt(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	// Start mock server after a delay (simulating server becoming available)
-	var mock *mockHAProxyServer
-	serverStarted := make(chan struct{})
-
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		mock = newMockHAProxyServer(t)
-		mock.SetResponse("show ssl cert", "/etc/haproxy/certs/test.pem\n")
-		serverStarted <- struct{}{}
-	}()
-
-	// Wait for server to start
-	<-serverStarted
-	defer mock.Close()
-
-	client, err := NewClient(mock.Addr(), logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	// Should succeed now that server is up
-	certs, err := client.ListCertificates()
-	if err != nil {
-		t.Errorf("ListCertificates() error = %v", err)
-	}
-	if len(certs) != 1 || certs[0] != "/etc/haproxy/certs/test.pem" {
-		t.Errorf("ListCertificates() = %v, want [/etc/haproxy/certs/test.pem]", certs)
-	}
-}
-
 // =============================================================================
-// Command Name Extraction Tests
+// Path Prefix Extraction Tests
 // =============================================================================
 
-func TestExtractCommandName(t *testing.T) {
+func TestExtractPathPrefix(t *testing.T) {
 	tests := []struct {
-		command  string
+		path     string
 		expected string
 	}{
-		{"show ssl cert", "show ssl"},
-		{"show ssl cert /path/to/cert.pem", "show ssl"},
-		{"set ssl cert /path/to/cert.pem <<\nPEM DATA", "set ssl"},
-		{"commit ssl cert /path/to/cert.pem", "commit ssl"},
-		{"abort ssl cert /path/to/cert.pem", "abort ssl"},
-		{"show info", "show info"},
-		{"help", "help"},
-		{"", "unknown"},
-		{"   show ssl cert   ", "show ssl"},
+		{"/v3/services/haproxy/runtime/certs", "/v3/services"},
+		{"/v3/services/haproxy/runtime/certs/example.com.pem", "/v3/services"},
+		{"/api/version", "/api/version"},
+		{"/health", "/health"},
+		{"/", "/"},
+		{"", "/"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.command, func(t *testing.T) {
-			got := extractCommandName(tt.command)
+		t.Run(tt.path, func(t *testing.T) {
+			got := extractPathPrefix(tt.path)
 			if got != tt.expected {
-				t.Errorf("extractCommandName(%q) = %q, want %q", tt.command, got, tt.expected)
+				t.Errorf("extractPathPrefix(%q) = %q, want %q", tt.path, got, tt.expected)
 			}
 		})
 	}
