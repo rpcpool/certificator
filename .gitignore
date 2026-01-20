@@ -4,6 +4,7 @@
 *.dll
 *.so
 *.dylib
+build/
 
 # Test binary, built with `go test -c`
 *.test
@@ -25,3 +26,14 @@ devenv.local.nix
 .pre-commit-config.yaml
 # Added by goreleaser init:
 dist/
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml

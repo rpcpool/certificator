@@ -55,9 +55,17 @@ type Config struct {
 
 // Configuration values specific to the certificatee tool
 type Certificatee struct {
-	CertificatePath      string        `envconfig:"CERTIFICATEE_CERTIFICATE_PATH" default:""`
-	CertificateExtension string        `envconfig:"CERTIFICATEE_CERTIFICATE_EXTENSION" default:""`
-	UpdateInterval       time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"24h"`
+	UpdateInterval  time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"24h"`
+	RenewBeforeDays int           `envconfig:"CERTIFICATEE_RENEW_BEFORE_DAYS" default:"30"`
+	// HAProxyDataPlaneAPIURLs is a comma-separated list of HAProxy Data Plane API URLs
+	// Example: "http://127.0.0.1:5555,https://haproxy2.local:5555"
+	HAProxyDataPlaneAPIURLs []string `envconfig:"HAPROXY_DATAPLANE_API_URLS" default:""`
+	// HAProxyDataPlaneAPIUser is the username for HAProxy Data Plane API basic auth
+	HAProxyDataPlaneAPIUser string `envconfig:"HAPROXY_DATAPLANE_API_USER" default:""`
+	// HAProxyDataPlaneAPIPassword is the password for HAProxy Data Plane API basic auth
+	HAProxyDataPlaneAPIPassword string `envconfig:"HAPROXY_DATAPLANE_API_PASSWORD" default:""`
+	// HAProxyDataPlaneAPIInsecure skips TLS certificate verification (not recommended for production)
+	HAProxyDataPlaneAPIInsecure bool `envconfig:"HAPROXY_DATAPLANE_API_INSECURE" default:"false"`
 }
 
 // LoadConfig loads configuration options to  variable

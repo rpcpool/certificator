@@ -68,19 +68,18 @@ func main() {
 				cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement)
 			if err != nil {
 				failedDomains = append(failedDomains, mainDomain)
+				certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
 				logger.Error(err)
 				continue
 			}
+			certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
+			logger.Infof("certificate for %s renewed successfully", mainDomain)
 		} else {
-			certmetrics.CertificatesCurrent.WithLabelValues(mainDomain).Set(1)
 			logger.Infof("certificate for %s is up to date, skipping renewal", mainDomain)
 		}
 	}
 
 	if len(failedDomains) > 0 {
-		for _, domain := range failedDomains {
-			certmetrics.CertificatesReissueFailures.WithLabelValues(domain).Inc()
-		}
 		logger.Fatalf("Failed to renew certificates for: %v", failedDomains)
 	}
 }
