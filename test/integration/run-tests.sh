@@ -212,13 +212,6 @@ EOF
     log_info "Data Plane API is ready"
 }
 
-build_certificatee() {
-    log_info "Building certificatee..."
-    cd "${PROJECT_ROOT}"
-    go build -o "${TEST_DIR}/certificatee" ./cmd/certificatee
-    log_info "certificatee built successfully"
-}
-
 test_list_certs() {
     log_info "Testing 'certificatee list-certs' command..."
 
@@ -350,7 +343,8 @@ main() {
     create_haproxy_config
     start_haproxy
     start_dataplaneapi
-    build_certificatee
+    export BUILD_DIR="${TEST_DIR}"
+    build
 
     echo ""
     log_info "Running tests..."

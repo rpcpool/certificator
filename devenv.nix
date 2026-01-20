@@ -76,9 +76,12 @@ in
 
   scripts = {
     build.exec = ''
-      echo "Building certificator..."
-      go build -v ./cmd/certificator
-      go build -v ./cmd/certificatee
+      export BUILD_DIR="''${BUILD_DIR:-build}"
+      echo "Building certificator to $BUILD_DIR..."
+      clean
+      mkdir -p "$BUILD_DIR"
+      go build -o "$BUILD_DIR" -v ./cmd/certificator
+      go build -o "$BUILD_DIR" -v ./cmd/certificatee
       echo "Build complete!"
     '';
 
@@ -160,8 +163,9 @@ in
 
     # Clean build artifacts
     clean.exec = ''
-      echo "Cleaning build artifacts..."
-      rm -f certificator certificatee
+      BUILD_DIR="''${BUILD_DIR:-build}"
+      echo "Cleaning build artifacts in $BUILD_DIR..."
+      rm -f "$BUILD_DIR/certificator" "$BUILD_DIR/certificatee"
       rm -f coverage.out coverage.html
       go clean -cache -testcache
       echo "Clean complete!"
