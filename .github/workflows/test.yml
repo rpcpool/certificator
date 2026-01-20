@@ -28,7 +28,7 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
 
       - name: Install devenv
-        run: nix profile install nixpkgs#devenv
+        run: nix profile add nixpkgs#devenv
 
       - name: Run Checks (lint, vet, test)
         run: devenv shell check
