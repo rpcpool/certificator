@@ -82,7 +82,7 @@ in
       echo "Build complete!"
     '';
 
-    test.exec = ''
+    run-tests.exec = ''
       echo "Running tests..."
       go test -v ./...
     '';
@@ -104,18 +104,41 @@ in
     check.exec = ''
       echo "=== Running all checks ==="
       echo ""
-      echo ">>> Formatting..."
-      gofmt -w -s .
-      goimports -w .
+      echo ">>> Checking gofmt..."
+      GOFMT_OUTPUT=$(find . -name '*.go' -not -path './.devenv/*' -not -path './vendor/*' | xargs gofmt -l -s)
+      if [ -n "$GOFMT_OUTPUT" ]; then
+        echo "gofmt found formatting issues in:"
+        echo "$GOFMT_OUTPUT"
+        echo ""
+        echo "Run 'gofmt -w -s .' to fix"
+        exit 1
+      fi
+      echo "gofmt: OK"
+
+      echo ""
+      echo ">>> Checking goimports..."
+      GOIMPORTS_OUTPUT=$(find . -name '*.go' -not -path './.devenv/*' -not -path './vendor/*' | xargs goimports -l)
+      if [ -n "$GOIMPORTS_OUTPUT" ]; then
+        echo "goimports found issues in:"
+        echo "$GOIMPORTS_OUTPUT"
+        echo ""
+        echo "Run 'goimports -w .' to fix"
+        exit 1
+      fi
+      echo "goimports: OK"
+
       echo ""
       echo ">>> Running go vet..."
       go vet ./...
+
       echo ""
       echo ">>> Running golangci-lint..."
       golangci-lint run ./...
+
       echo ""
       echo ">>> Running tests..."
       go test -v ./...
+
       echo ""
       echo "=== All checks passed! ==="
     '';
@@ -165,7 +188,7 @@ in
     echo ""
     echo "Available commands:"
     echo "  build            - Build certificator and certificatee"
-    echo "  test             - Run all tests"
+    echo "  run-tests        - Run unit tests"
     echo "  test-coverage    - Run tests with coverage report"
     echo "  test-watch       - Watch for changes and run tests"
     echo "  tidy             - Tidy go.mod dependencies"
@@ -179,7 +202,7 @@ in
   enterTest = ''
     echo "Running devenv tests..."
     go version
-    go test -v ./...
+    command go test -v ./...
 
     echo ""
     echo "Running integration tests..."
@@ -188,7 +211,11 @@ in
 
   git-hooks.hooks = {
     gofmt.enable = true;
+    goimports = {
+      enable = true;
+      entry = "${pkgs.gotools}/bin/goimports -l -w";
+    };
     govet.enable = true;
-    staticcheck.enable = true;
+    golangci-lint.enable = true;
   };
 }

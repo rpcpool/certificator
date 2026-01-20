@@ -15,7 +15,7 @@ jobs:
 
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
 
     steps:
       - name: Checkout Code
@@ -30,49 +30,48 @@ jobs:
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
 
-      - name: Run Linting
+      - name: Run Checks (lint, vet, test)
+        run: devenv shell check
+
+      - name: Generate Coverage Report
+        run: devenv shell test-coverage
+
+      - name: Extract Coverage Data
+        if: github.event_name == 'pull_request'
+        id: coverage
         run: |
-          devenv shell bash -- -c '
-            echo "=== Running gofmt ==="
-            gofmt -l -d . | tee /tmp/gofmt.out
-            if [ -s /tmp/gofmt.out ]; then
-              echo "gofmt found formatting issues"
-              exit 1
-            fi
+          {
+            echo 'report<<EOF'
+            devenv shell -- go tool cover -func=coverage.out | tail -1
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo 'details<<EOF'
+            devenv shell -- go tool cover -func=coverage.out
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
-            echo "=== Running goimports ==="
-            goimports -l -d . | tee /tmp/goimports.out
-            if [ -s /tmp/goimports.out ]; then
-              echo "goimports found issues"
-              exit 1
-            fi
+      - name: Post Coverage Comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@52423e01640425a022ef5fd42c6fb5f633a02728 # v2.9.1
+        with:
+          header: coverage
+          message: |
+            ## Code Coverage Report
 
-            echo "=== Running go vet ==="
-            go vet ./...
+            **Total Coverage:** `${{ steps.coverage.outputs.report }}`
 
-            echo "=== Running golangci-lint ==="
-            golangci-lint run ./...
-          '
+            <details>
+            <summary>Coverage by function</summary>
 
-      - name: Run Unit Tests
-        run: |
-          devenv shell bash -- -c '
-            echo "=== Running unit tests ==="
-            go test -v -race ./...
-          '
+            ```
+            ${{ steps.coverage.outputs.details }}
+            ```
+
+            </details>
 
       - name: Run Integration Tests
-        run: |
-          devenv shell bash -- -c '
-            echo "=== Running integration tests ==="
-            ./test/integration/run-tests.sh
-          '
+        run: devenv shell integration-test
 
       - name: Build Binaries
-        run: |
-          devenv shell bash -- -c '
-            echo "=== Building binaries ==="
-            go build -o certificator ./cmd/certificator
-            go build -o certificatee ./cmd/certificatee
-            echo "Build complete!"
-          '
+        run: devenv shell build
