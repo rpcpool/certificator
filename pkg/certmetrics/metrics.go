@@ -13,66 +13,49 @@ import (
 )
 
 var (
-	// shared
+	// Shared metrics
 	Up = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "up",
-		Help: "Indicates if Certificatee is running (1 = up, 0 = down)",
+		Help: "Indicates if the service is running (1 = up, 0 = down)",
 	}, []string{"service", "version", "hostname", "environment"})
-	CertificatesCurrent = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "certificator_certificates_current",
-		Help: "Current number of valid certificates managed by Certificator",
+
+	// Certificator metrics - certificate renewals
+	CertificatesRenewed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificator_certificates_renewed_total",
+		Help: "Total number of certificates successfully renewed",
+	}, []string{"domain"})
+	CertificatesRenewalFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificator_certificates_renewal_failures_total",
+		Help: "Total number of certificate renewal failures",
 	}, []string{"domain"})
 
-	// certificator
-	CertificatesReissued = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificator_certificates_reissued_total",
-		Help: "Total number of certificates reissued by Certificator",
-	}, []string{"domain"})
-	CertificatesReissueFailures = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificator_certificates_reissue_failures_total",
-		Help: "Total number of certificate reissue failures by Certificator",
-	}, []string{"domain"})
-
-	// certificatee
-	CertificatesUpdatedOnDisk = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "certificatee_certificates_updated_on_disk_total",
-		Help: "Total number of certificates updated on disk by Certificatee",
-	}, []string{"domain"})
+	// Certificatee metrics - certificate updates and expiry
+	CertificatesUpdated = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_certificates_updated_total",
+		Help: "Total number of certificates successfully updated in HAProxy",
+	}, []string{"endpoint", "domain"})
 	CertificatesUpdateFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "certificatee_certificates_update_failures_total",
-		Help: "Total number of certificate update failures by Certificatee",
-	}, []string{"domain"})
-
-	// HAProxy-specific metrics
-	HAProxyConnectionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificatee_haproxy_connections_total",
-		Help: "Total number of HAProxy connection attempts",
-	}, []string{"endpoint", "status"})
-	HAProxyConnectionRetries = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificatee_haproxy_connection_retries_total",
-		Help: "Total number of HAProxy connection retries",
-	}, []string{"endpoint"})
-	HAProxyCertificatesUpdated = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificatee_haproxy_certificates_updated_total",
-		Help: "Total number of certificates updated in HAProxy",
+		Help: "Total number of certificate update failures",
 	}, []string{"endpoint", "domain"})
-	HAProxyCertificatesChecked = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificatee_haproxy_certificates_checked_total",
-		Help: "Total number of certificates checked in HAProxy",
+	CertificatesExpiring = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_certificates_expiring",
+		Help: "Number of certificates expiring within the renewal threshold",
 	}, []string{"endpoint"})
-	HAProxyEndpointsUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	CertificatesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_certificates_total",
+		Help: "Total number of certificates managed per endpoint",
+	}, []string{"endpoint"})
+
+	// HAProxy endpoint health
+	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_haproxy_endpoint_up",
 		Help: "Indicates if HAProxy endpoint is reachable (1 = up, 0 = down)",
 	}, []string{"endpoint"})
-	HAProxyLastCheckTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "certificatee_haproxy_last_check_timestamp_seconds",
-		Help: "Unix timestamp of the last successful certificate check",
+	LastSyncTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_last_sync_timestamp_seconds",
+		Help: "Unix timestamp of the last successful sync",
 	}, []string{"endpoint"})
-	HAProxyCommandDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "certificatee_haproxy_command_duration_seconds",
-		Help:    "Duration of HAProxy Runtime API commands",
-		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
-	}, []string{"endpoint", "command"})
 )
 
 func StartMetricsServer(logger *logrus.Logger, address string) {

@@ -3,11 +3,42 @@
 let
   # Read Go version from go.mod automatically
   goModContent = builtins.readFile ./go.mod;
-  goVersionLine = lib.findFirst 
-    (line: lib.hasPrefix "go " line) 
-    "go 1.24" 
+  goVersionLine = lib.findFirst
+    (line: lib.hasPrefix "go " line)
+    "go 1.24"
     (lib.splitString "\n" goModContent);
   goVersion = lib.removePrefix "go " (lib.trim goVersionLine);
+
+  # HAProxy Data Plane API - built from source
+  dataplaneapi = pkgs.buildGoModule rec {
+    pname = "dataplaneapi";
+    version = "3.0.2";
+
+    src = pkgs.fetchFromGitHub {
+      owner = "haproxytech";
+      repo = "dataplaneapi";
+      rev = "v${version}";
+      hash = "sha256-SFI7WKPxF31b97Q4EWbsTbp3laXHcUfdg4hlFUiml5A=";
+    };
+
+    vendorHash = "sha256-vm+NUf8OCW+jCiPY13d/MjQpy3/NxEwx7Zol2bP+eF4=";
+
+    # Skip tests as they require network access
+    doCheck = false;
+
+    ldflags = [
+      "-s" "-w"
+      "-X main.GitRepo=https://github.com/haproxytech/dataplaneapi"
+      "-X main.GitTag=v${version}"
+    ];
+
+    meta = with lib; {
+      description = "HAProxy Data Plane API";
+      homepage = "https://github.com/haproxytech/dataplaneapi";
+      license = licenses.asl20;
+    };
+  };
+
 in
 {
   env = {
@@ -34,6 +65,9 @@ in
     yq              # YAML processing
     curl            # HTTP client
     socat           # Socket testing (useful for HAProxy runtime API testing)
+    haproxy         # HAProxy load balancer
+    dataplaneapi    # HAProxy Data Plane API
+    openssl         # For generating test certificates
   ];
 
   languages.go = {
@@ -109,6 +143,12 @@ in
       go clean -cache -testcache
       echo "Clean complete!"
     '';
+
+    # Integration test for certificatee list-certs
+    integration-test.exec = ''
+      echo "=== Running Integration Tests ==="
+      ${lib.getExe pkgs.bash} ./test/integration/run-tests.sh
+    '';
   };
 
   # Shell hook - runs when entering the devenv
@@ -120,15 +160,18 @@ in
     echo ""
     echo "Go version (from go.mod): ${goVersion}"
     echo "Go version (active):      $(go version | cut -d' ' -f3)"
+    echo "HAProxy version:          $(haproxy -v | head -1)"
+    echo "Data Plane API:           $(dataplaneapi --version 2>&1 | head -1 || echo 'available')"
     echo ""
     echo "Available commands:"
-    echo "  build          - Build certificator and certificatee"
-    echo "  test           - Run all tests"
-    echo "  test-coverage  - Run tests with coverage report"
-    echo "  test-watch     - Watch for changes and run tests"
-    echo "  tidy           - Tidy go.mod dependencies"
-    echo "  check          - Run all checks (fmt, vet, lint, test)"
-    echo "  clean          - Clean build artifacts"
+    echo "  build            - Build certificator and certificatee"
+    echo "  test             - Run all tests"
+    echo "  test-coverage    - Run tests with coverage report"
+    echo "  test-watch       - Watch for changes and run tests"
+    echo "  tidy             - Tidy go.mod dependencies"
+    echo "  check            - Run all checks (fmt, vet, lint, test)"
+    echo "  clean            - Clean build artifacts"
+    echo "  integration-test - Run HAProxy integration tests"
     echo ""
   '';
 
@@ -137,6 +180,10 @@ in
     echo "Running devenv tests..."
     go version
     go test -v ./...
+
+    echo ""
+    echo "Running integration tests..."
+    bash ./test/integration/run-tests.sh
   '';
 
   git-hooks.hooks = {

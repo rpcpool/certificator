@@ -452,31 +452,31 @@ func TestListCertificates(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		response   []CertInfo
+		response   []SSLCertificateEntry
 		statusCode int
 		want       []string
 		wantErr    bool
 	}{
 		{
 			name: "normal response with multiple certs",
-			response: []CertInfo{
-				{Filename: "/etc/haproxy/certs/site1.pem"},
-				{Filename: "/etc/haproxy/certs/site2.pem"},
+			response: []SSLCertificateEntry{
+				{File: "/etc/haproxy/certs/site1.pem", StorageName: "site1.pem"},
+				{File: "/etc/haproxy/certs/site2.pem", StorageName: "site2.pem"},
 			},
 			statusCode: http.StatusOK,
-			want:       []string{"/etc/haproxy/certs/site1.pem", "/etc/haproxy/certs/site2.pem"},
+			want:       []string{"site1.pem", "site2.pem"},
 			wantErr:    false,
 		},
 		{
 			name:       "empty response",
-			response:   []CertInfo{},
+			response:   []SSLCertificateEntry{},
 			statusCode: http.StatusOK,
 			want:       nil,
 			wantErr:    false,
 		},
 		{
-			name: "certs with storage_name instead of file",
-			response: []CertInfo{
+			name: "certs with storage_name",
+			response: []SSLCertificateEntry{
 				{StorageName: "example.com.pem"},
 				{StorageName: "test.com.pem"},
 			},
@@ -486,11 +486,11 @@ func TestListCertificates(t *testing.T) {
 		},
 		{
 			name: "single certificate",
-			response: []CertInfo{
-				{Filename: "/etc/haproxy/certs/only.pem"},
+			response: []SSLCertificateEntry{
+				{File: "/etc/haproxy/certs/only.pem", StorageName: "only.pem"},
 			},
 			statusCode: http.StatusOK,
-			want:       []string{"/etc/haproxy/certs/only.pem"},
+			want:       []string{"only.pem"},
 			wantErr:    false,
 		},
 		{
@@ -506,7 +506,7 @@ func TestListCertificates(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v3/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tt.statusCode)
 				if tt.response != nil {
@@ -544,55 +544,70 @@ func TestGetCertificateInfo(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
+	// Sample PEM certificate for testing (self-signed, CN=example.com)
+	validPEM := `-----BEGIN CERTIFICATE-----
+MIIDDTCCAfWgAwIBAgIUe9mCIn9FkwgXLlsXK6cwCMbavacwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wHhcNMjYwMTIwMTQwMTM0WhcNMjcw
+MTIwMTQwMTM0WjAWMRQwEgYDVQQDDAtleGFtcGxlLmNvbTCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAK9vQbb4mhM0EKzKF40tM4UtZNquBfAR4RwaJWme
+WowIe/zBK8qZxSO8W+1LmJguR1CLlytfQ3iv5y4LdQ1tsn350EmmHKfD31NOHxr9
+F3GmsmSkHJBbukcpAl28ezTajtCImn6wciuui5ivUbKfuZXn4AEBNlaerGywQE2Y
+0CNMKZ1/HnyrJymWyPb4tyJzfyYOdsPLwPt7GTAt4yqsRHnjIaIO2KD2OkmgFWMC
+K5w64M8Zs7cg5Jk1zE0hFDKAE/3T78SYDGh+kHmDe68P75VACJBDgWYLWRAFWsOA
+o8IrAUNYvCKHHXshEnR2HJSgoPT6nkNOgVzWTG52hnNuhLsCAwEAAaNTMFEwHQYD
+VR0OBBYEFMljzE+9nN38vJhdB1ovTbiyuuZAMB8GA1UdIwQYMBaAFMljzE+9nN38
+vJhdB1ovTbiyuuZAMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB
+ABI48y8xh9jQSYPmt9dIkMUmI8WyjkdVzBIs4vAqZ1DeOsxUJ3dLwmr1ImTTY7Sw
+m6yDoTNInWsdjo5rjA9mgrkq5OTSVJNVe2bcNfZyFsTJ7B1OwGffCzBnFNwW/Zzf
+OzZ53OaXmtWHeMP2cHhH7yEX7NVuB0HB/8CTu1F/jLuUTaaiCGbF+VCCHtLL5RAL
+N4Vg0dt1Ls7qBpX/22o3cMNI15ixOOhW6Qug2at304/K0SJsXQifJ7SQiMRU84ov
+FouJ5aRz+i5UvgFqDEMHY1PaEDXPAwHH+Kl3iC6L59McPRD3yRNlOMqquAOS2b8Y
+kF7B68QUswmVK4Icz6zBgmo=
+-----END CERTIFICATE-----`
+
 	tests := []struct {
 		name       string
 		certPath   string
-		response   *CertInfo
+		pemData    string
 		statusCode int
 		wantErr    bool
 		checkFunc  func(t *testing.T, info *CertInfo)
 	}{
 		{
-			name:     "valid certificate info",
-			certPath: "example.com.pem",
-			response: &CertInfo{
-				Filename:     "/etc/haproxy/certs/example.com.pem",
-				Status:       "Used",
-				Serial:       "ABC123DEF456",
-				NotBeforeStr: "2024-01-01T00:00:00Z",
-				NotAfterStr:  "2024-12-31T23:59:59Z",
-				Subject:      "/CN=example.com",
-				Issuer:       "/CN=Test CA",
-				Algorithm:    "RSA2048",
-				SANs:         []string{"example.com", "www.example.com"},
-			},
+			name:       "valid certificate info",
+			certPath:   "example.com.pem",
+			pemData:    validPEM,
 			statusCode: http.StatusOK,
 			wantErr:    false,
 			checkFunc: func(t *testing.T, info *CertInfo) {
-				if info.Serial != "ABC123DEF456" {
-					t.Errorf("Serial = %q, want %q", info.Serial, "ABC123DEF456")
+				if info.Subject == "" {
+					t.Error("Subject should not be empty")
 				}
-				if len(info.SANs) != 2 {
-					t.Errorf("SANs count = %d, want 2", len(info.SANs))
-				}
-				if info.NotAfter.Year() != 2024 {
-					t.Errorf("NotAfter year = %d, want 2024", info.NotAfter.Year())
+				if info.NotAfter.IsZero() {
+					t.Error("NotAfter should be set")
 				}
 			},
 		},
 		{
 			name:       "certificate not found",
 			certPath:   "notfound.pem",
-			response:   nil,
+			pemData:    "",
 			statusCode: http.StatusNotFound,
 			wantErr:    true,
 		},
 		{
 			name:       "server error",
 			certPath:   "error.pem",
-			response:   nil,
+			pemData:    "",
 			statusCode: http.StatusInternalServerError,
 			wantErr:    true,
+		},
+		{
+			name:       "invalid PEM data",
+			certPath:   "invalid.pem",
+			pemData:    "not a valid PEM",
+			statusCode: http.StatusOK,
+			wantErr:    true, // Should fail to parse
 		},
 	}
 
@@ -601,11 +616,10 @@ func TestGetCertificateInfo(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v3/services/haproxy/runtime/certs/"+tt.certPath, func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
+			mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates/"+tt.certPath, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
-				if tt.response != nil {
-					_ = json.NewEncoder(w).Encode(tt.response)
+				if tt.statusCode == http.StatusOK {
+					_, _ = w.Write([]byte(tt.pemData))
 				} else {
 					_, _ = w.Write([]byte(`{"message": "error"}`))
 				}
@@ -876,10 +890,10 @@ func TestBasicAuth(t *testing.T) {
 	defer mock.Close()
 	mock.SetAuth("admin", "secret")
 
-	mock.SetHandler("GET", "/v3/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+	mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode([]CertInfo{})
+		_ = json.NewEncoder(w).Encode([]SSLCertificateEntry{})
 	})
 
 	t.Run("valid credentials", func(t *testing.T) {
@@ -1121,32 +1135,5 @@ func TestNoRetryWithZeroMaxRetries(t *testing.T) {
 	// Should be fast since no retries
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("Should have failed quickly without retries, elapsed: %v", elapsed)
-	}
-}
-
-// =============================================================================
-// Path Prefix Extraction Tests
-// =============================================================================
-
-func TestExtractPathPrefix(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected string
-	}{
-		{"/v3/services/haproxy/runtime/certs", "/v3/services"},
-		{"/v3/services/haproxy/runtime/certs/example.com.pem", "/v3/services"},
-		{"/api/version", "/api/version"},
-		{"/health", "/health"},
-		{"/", "/"},
-		{"", "/"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := extractPathPrefix(tt.path)
-			if got != tt.expected {
-				t.Errorf("extractPathPrefix(%q) = %q, want %q", tt.path, got, tt.expected)
-			}
-		})
 	}
 }

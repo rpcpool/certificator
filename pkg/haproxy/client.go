@@ -3,19 +3,21 @@ package haproxy
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/vinted/certificator/pkg/certmetrics"
 )
 
 // Default retry configuration
@@ -176,7 +178,6 @@ func (c *Client) doRequest(method, path string, body io.Reader, contentType stri
 
 	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
 		if attempt > 0 {
-			certmetrics.HAProxyConnectionRetries.WithLabelValues(c.baseURL).Inc()
 			delay := c.calculateBackoff(attempt - 1)
 			c.logger.Debugf("Retry %d/%d for %s after %v", attempt, c.retryConfig.MaxRetries, c.baseURL, delay)
 			time.Sleep(delay)
@@ -209,17 +210,8 @@ func (c *Client) doRequest(method, path string, body io.Reader, contentType stri
 		}
 
 		// Execute request
-		start := time.Now()
 		resp, err := c.httpClient.Do(req)
-		duration := time.Since(start)
-
-		// Record metrics
-		cmdName := method + " " + extractPathPrefix(path)
-		certmetrics.HAProxyCommandDuration.WithLabelValues(c.baseURL, cmdName).Observe(duration.Seconds())
-
 		if err == nil {
-			certmetrics.HAProxyConnectionsTotal.WithLabelValues(c.baseURL, "success").Inc()
-			certmetrics.HAProxyEndpointsUp.WithLabelValues(c.baseURL).Set(1)
 			if attempt > 0 {
 				c.logger.Infof("Successfully connected to %s after %d retries", c.baseURL, attempt)
 			}
@@ -230,8 +222,6 @@ func (c *Client) doRequest(method, path string, body io.Reader, contentType stri
 		c.logger.Debugf("Request attempt %d failed for %s: %v", attempt+1, c.baseURL, err)
 	}
 
-	certmetrics.HAProxyConnectionsTotal.WithLabelValues(c.baseURL, "failure").Inc()
-	certmetrics.HAProxyEndpointsUp.WithLabelValues(c.baseURL).Set(0)
 	return nil, errors.Wrapf(lastErr, "failed to connect to HAProxy Data Plane API at %s after %d attempts", c.baseURL, c.retryConfig.MaxRetries+1)
 }
 
@@ -242,7 +232,6 @@ func (c *Client) doRequestWithBodyBuffer(method, path string, bodyData []byte, c
 
 	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
 		if attempt > 0 {
-			certmetrics.HAProxyConnectionRetries.WithLabelValues(c.baseURL).Inc()
 			delay := c.calculateBackoff(attempt - 1)
 			c.logger.Debugf("Retry %d/%d for %s after %v", attempt, c.retryConfig.MaxRetries, c.baseURL, delay)
 			time.Sleep(delay)
@@ -268,17 +257,8 @@ func (c *Client) doRequestWithBodyBuffer(method, path string, bodyData []byte, c
 		}
 
 		// Execute request
-		start := time.Now()
 		resp, err := c.httpClient.Do(req)
-		duration := time.Since(start)
-
-		// Record metrics
-		cmdName := method + " " + extractPathPrefix(path)
-		certmetrics.HAProxyCommandDuration.WithLabelValues(c.baseURL, cmdName).Observe(duration.Seconds())
-
 		if err == nil {
-			certmetrics.HAProxyConnectionsTotal.WithLabelValues(c.baseURL, "success").Inc()
-			certmetrics.HAProxyEndpointsUp.WithLabelValues(c.baseURL).Set(1)
 			if attempt > 0 {
 				c.logger.Infof("Successfully connected to %s after %d retries", c.baseURL, attempt)
 			}
@@ -289,27 +269,42 @@ func (c *Client) doRequestWithBodyBuffer(method, path string, bodyData []byte, c
 		c.logger.Debugf("Request attempt %d failed for %s: %v", attempt+1, c.baseURL, err)
 	}
 
-	certmetrics.HAProxyConnectionsTotal.WithLabelValues(c.baseURL, "failure").Inc()
-	certmetrics.HAProxyEndpointsUp.WithLabelValues(c.baseURL).Set(0)
 	return nil, errors.Wrapf(lastErr, "failed to connect to HAProxy Data Plane API at %s after %d attempts", c.baseURL, c.retryConfig.MaxRetries+1)
 }
 
-// extractPathPrefix extracts a meaningful prefix from the path for metrics labeling
-func extractPathPrefix(path string) string {
-	// Extract first two path segments for labeling
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) >= 2 {
-		return "/" + parts[0] + "/" + parts[1]
-	}
-	if len(parts) == 1 {
-		return "/" + parts[0]
-	}
-	return "/"
+// SSLCertificateEntry represents an SSL certificate entry from storage API
+type SSLCertificateEntry struct {
+	File        string `json:"file"`
+	StorageName string `json:"storage_name"`
+	Description string `json:"description"`
+}
+
+// CertificateRef holds both display name and file path for a certificate
+type CertificateRef struct {
+	// DisplayName is the storage_name or filename for display purposes
+	DisplayName string
+	// FilePath is the full file path used for API lookups
+	FilePath string
 }
 
 // ListCertificates returns a list of certificates from HAProxy Data Plane API
 func (c *Client) ListCertificates() ([]string, error) {
-	resp, err := c.doRequest("GET", "/v3/services/haproxy/runtime/certs", nil, "")
+	refs, err := c.ListCertificateRefs()
+	if err != nil {
+		return nil, err
+	}
+
+	var certNames []string
+	for _, ref := range refs {
+		certNames = append(certNames, ref.DisplayName)
+	}
+	return certNames, nil
+}
+
+// ListCertificateRefs returns a list of certificate references with both display names and file paths
+func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
+	// Use storage API endpoint for listing SSL certificates
+	resp, err := c.doRequest("GET", "/v3/services/haproxy/storage/ssl_certificates", nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -320,26 +315,40 @@ func (c *Client) ListCertificates() ([]string, error) {
 		return nil, errors.Errorf("failed to list certificates: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	var certs []CertInfo
+	var certs []SSLCertificateEntry
 	if err := json.NewDecoder(resp.Body).Decode(&certs); err != nil {
 		return nil, errors.Wrap(err, "failed to decode certificate list")
 	}
 
-	var certNames []string
+	var refs []CertificateRef
 	for _, cert := range certs {
-		if cert.Filename != "" {
-			certNames = append(certNames, cert.Filename)
-		} else if cert.StorageName != "" {
-			certNames = append(certNames, cert.StorageName)
+		ref := CertificateRef{
+			FilePath: cert.File,
+		}
+		// Prefer storage_name for display, fall back to file path
+		if cert.StorageName != "" {
+			ref.DisplayName = cert.StorageName
+		} else if cert.File != "" {
+			ref.DisplayName = cert.File
+		}
+		if ref.DisplayName != "" || ref.FilePath != "" {
+			refs = append(refs, ref)
 		}
 	}
 
-	return certNames, nil
+	return refs, nil
 }
 
-// GetCertificateInfo retrieves detailed information about a specific certificate
+// GetCertificateInfo retrieves detailed information about a specific certificate by name
 func (c *Client) GetCertificateInfo(certName string) (*CertInfo, error) {
-	path := fmt.Sprintf("/v3/services/haproxy/runtime/certs/%s", certName)
+	return c.GetCertificateInfoByPath(certName, certName)
+}
+
+// GetCertificateInfoByPath retrieves detailed information about a certificate using its file path
+func (c *Client) GetCertificateInfoByPath(filePath, displayName string) (*CertInfo, error) {
+	// URL-encode the file path for the API request
+	encodedPath := url.PathEscape(filePath)
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s", encodedPath)
 	resp, err := c.doRequest("GET", path, nil, "")
 	if err != nil {
 		return nil, err
@@ -347,7 +356,7 @@ func (c *Client) GetCertificateInfo(certName string) (*CertInfo, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, errors.Errorf("certificate %s not found", certName)
+		return nil, errors.Errorf("certificate %s not found", displayName)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -355,24 +364,53 @@ func (c *Client) GetCertificateInfo(certName string) (*CertInfo, error) {
 		return nil, errors.Errorf("failed to get certificate info: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	var info CertInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, errors.Wrap(err, "failed to decode certificate info")
+	// The storage API returns the PEM content directly
+	pemData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read certificate data")
 	}
 
-	// Parse time strings
-	if info.NotBeforeStr != "" {
-		if t, err := parseDataPlaneAPITime(info.NotBeforeStr); err == nil {
-			info.NotBefore = t
-		}
-	}
-	if info.NotAfterStr != "" {
-		if t, err := parseDataPlaneAPITime(info.NotAfterStr); err == nil {
-			info.NotAfter = t
-		}
+	// Parse the PEM certificate to extract info
+	info, err := parsePEMCertificate(pemData, displayName)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse certificate")
 	}
 
-	return &info, nil
+	return info, nil
+}
+
+// GetCertificateInfoByRef retrieves detailed information using a CertificateRef
+func (c *Client) GetCertificateInfoByRef(ref CertificateRef) (*CertInfo, error) {
+	filePath := ref.FilePath
+	if filePath == "" {
+		filePath = ref.DisplayName
+	}
+	return c.GetCertificateInfoByPath(filePath, ref.DisplayName)
+}
+
+// parsePEMCertificate parses a PEM certificate and extracts certificate info
+func parsePEMCertificate(pemData []byte, certName string) (*CertInfo, error) {
+	block, _ := pem.Decode(pemData)
+	if block == nil {
+		return nil, errors.New("failed to decode PEM block")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse X.509 certificate")
+	}
+
+	info := &CertInfo{
+		StorageName: certName,
+		Subject:     cert.Subject.String(),
+		Issuer:      cert.Issuer.String(),
+		Serial:      cert.SerialNumber.Text(16),
+		NotBefore:   cert.NotBefore,
+		NotAfter:    cert.NotAfter,
+		SANs:        cert.DNSNames,
+	}
+
+	return info, nil
 }
 
 // parseDataPlaneAPITime parses time strings from Data Plane API

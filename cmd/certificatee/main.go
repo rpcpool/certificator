@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"text/tabwriter"
 	"time"
 
 	legoLog "github.com/go-acme/lego/v4/log"
@@ -21,6 +23,43 @@ var (
 )
 
 func main() {
+	// Parse subcommand
+	args := os.Args[1:]
+	cmd := "sync" // default command
+
+	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
+		cmd = args[0]
+		args = args[1:]
+	}
+
+	switch cmd {
+	case "sync":
+		syncCmd(args)
+	case "list-certs":
+		listCertsCmd(args)
+	case "help", "-h", "--help":
+		printUsage()
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage: certificatee [command] [options]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  sync         Run the certificate sync daemon (default)")
+	fmt.Println("  list-certs   List certificates from HAProxy instances")
+	fmt.Println("  help         Show this help message")
+	fmt.Println()
+	fmt.Println("Options for list-certs:")
+	fmt.Println("  -v, --verbose    Show detailed certificate information")
+}
+
+func syncCmd(_ []string) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		cfg.Log.Logger.Fatal(err)
@@ -43,18 +82,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	// Create HAProxy Data Plane API client configurations
-	var clientConfigs []haproxy.ClientConfig
-	for _, url := range cfg.Certificatee.HAProxyDataPlaneAPIURLs {
-		clientConfigs = append(clientConfigs, haproxy.ClientConfig{
-			BaseURL:            url,
-			Username:           cfg.Certificatee.HAProxyDataPlaneAPIUser,
-			Password:           cfg.Certificatee.HAProxyDataPlaneAPIPassword,
-			InsecureSkipVerify: cfg.Certificatee.HAProxyDataPlaneAPIInsecure,
-		})
-	}
-
-	haproxyClients, err := haproxy.NewClients(clientConfigs, logger)
+	haproxyClients, err := createHAProxyClients(cfg, logger)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -82,6 +110,133 @@ func main() {
 	}
 }
 
+func listCertsCmd(args []string) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		cfg.Log.Logger.Fatal(err)
+	}
+
+	logger := cfg.Log.Logger
+	legoLog.Logger = logger
+
+	// Validate HAProxy Data Plane API configuration
+	if len(cfg.Certificatee.HAProxyDataPlaneAPIURLs) == 0 {
+		logger.Fatal("HAPROXY_DATAPLANE_API_URLS must be set (comma-separated list of Data Plane API URLs)")
+	}
+
+	// Check for verbose flag
+	verbose := false
+	for _, arg := range args {
+		if arg == "-v" || arg == "--verbose" {
+			verbose = true
+			break
+		}
+	}
+
+	haproxyClients, err := createHAProxyClients(cfg, logger)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	// Process each HAProxy endpoint
+	for _, client := range haproxyClients {
+		if err := listCertificates(client, verbose); err != nil {
+			logger.Errorf("Failed to list certificates from %s: %v", client.Endpoint(), err)
+		}
+	}
+}
+
+func createHAProxyClients(cfg config.Config, logger *logrus.Logger) ([]*haproxy.Client, error) {
+	var clientConfigs []haproxy.ClientConfig
+	for _, url := range cfg.Certificatee.HAProxyDataPlaneAPIURLs {
+		clientConfigs = append(clientConfigs, haproxy.ClientConfig{
+			BaseURL:            url,
+			Username:           cfg.Certificatee.HAProxyDataPlaneAPIUser,
+			Password:           cfg.Certificatee.HAProxyDataPlaneAPIPassword,
+			InsecureSkipVerify: cfg.Certificatee.HAProxyDataPlaneAPIInsecure,
+		})
+	}
+
+	return haproxy.NewClients(clientConfigs, logger)
+}
+
+func listCertificates(client *haproxy.Client, verbose bool) error {
+	endpoint := client.Endpoint()
+	fmt.Printf("\n=== Certificates on %s ===\n\n", endpoint)
+
+	if verbose {
+		// Use ListCertificateRefs for verbose mode to get both display names and file paths
+		certRefs, err := client.ListCertificateRefs()
+		if err != nil {
+			return fmt.Errorf("failed to list certificates: %w", err)
+		}
+
+		if len(certRefs) == 0 {
+			fmt.Println("No certificates found.")
+			return nil
+		}
+
+		// Show detailed info for each certificate
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "NAME\tSUBJECT\tISSUER\tNOT BEFORE\tNOT AFTER\tSERIAL")
+		_, _ = fmt.Fprintln(w, "----\t-------\t------\t----------\t---------\t------")
+
+		for _, ref := range certRefs {
+			info, err := client.GetCertificateInfoByRef(ref)
+			if err != nil {
+				_, _ = fmt.Fprintf(w, "%s\t<error: %v>\t\t\t\t\n", ref.DisplayName, err)
+				continue
+			}
+
+			notBefore := formatTime(info.NotBefore)
+			notAfter := formatTime(info.NotAfter)
+
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				ref.DisplayName,
+				truncate(info.Subject, 30),
+				truncate(info.Issuer, 30),
+				notBefore,
+				notAfter,
+				info.Serial,
+			)
+		}
+		_ = w.Flush()
+		fmt.Printf("\nTotal: %d certificate(s)\n", len(certRefs))
+	} else {
+		// Simple list
+		certPaths, err := client.ListCertificates()
+		if err != nil {
+			return fmt.Errorf("failed to list certificates: %w", err)
+		}
+
+		if len(certPaths) == 0 {
+			fmt.Println("No certificates found.")
+			return nil
+		}
+
+		for _, certPath := range certPaths {
+			fmt.Println(certPath)
+		}
+		fmt.Printf("\nTotal: %d certificate(s)\n", len(certPaths))
+	}
+
+	return nil
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "N/A"
+	}
+	return t.Format("2006-01-02")
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClients []*haproxy.Client) error {
 	var allErrs []error
 
@@ -101,26 +256,29 @@ func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClie
 func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
 	endpoint := haproxyClient.Endpoint()
 
-	// Get list of certificates from HAProxy
-	certPaths, err := haproxyClient.ListCertificates()
+	// Get list of certificates from HAProxy with file paths for lookups
+	certRefs, err := haproxyClient.ListCertificateRefs()
 	if err != nil {
-		certmetrics.HAProxyEndpointsUp.WithLabelValues(endpoint).Set(0)
+		certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(0)
 		return fmt.Errorf("failed to list certificates: %w", err)
 	}
 
-	// Mark endpoint as up and record check timestamp
-	certmetrics.HAProxyEndpointsUp.WithLabelValues(endpoint).Set(1)
-	certmetrics.HAProxyLastCheckTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
-	certmetrics.HAProxyCertificatesChecked.WithLabelValues(endpoint).Add(float64(len(certPaths)))
+	// Mark endpoint as up and record sync timestamp
+	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(1)
+	certmetrics.LastSyncTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
+	certmetrics.CertificatesTotal.WithLabelValues(endpoint).Set(float64(len(certRefs)))
 
-	logger.Infof("[%s] %d certificates found", endpoint, len(certPaths))
+	logger.Infof("[%s] %d certificates found", endpoint, len(certRefs))
 
 	var errs []error
-	for _, certPath := range certPaths {
+	var expiringCount int
+
+	for _, ref := range certRefs {
+		certPath := ref.DisplayName
 		logger.Infof("[%s] Checking certificate: %s", endpoint, certPath)
 
-		// Get certificate info from HAProxy
-		haproxyCertInfo, err := haproxyClient.GetCertificateInfo(certPath)
+		// Get certificate info from HAProxy using the file path
+		haproxyCertInfo, err := haproxyClient.GetCertificateInfoByRef(ref)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to get certificate info for %s: %w", certPath, err))
 			logger.Errorf("[%s] %v", endpoint, err)
@@ -130,6 +288,11 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		// Extract domain name from certificate path
 		domain := haproxy.ExtractDomainFromPath(certPath)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
+
+		// Track expiring certificates
+		if haproxy.IsExpiring(haproxyCertInfo, cfg.Certificatee.RenewBeforeDays) {
+			expiringCount++
+		}
 
 		// Check if certificate needs update
 		shouldUpdate, reason, err := shouldUpdateCertificate(logger, haproxyCertInfo, domain, vaultClient, cfg.Certificatee.RenewBeforeDays)
@@ -145,16 +308,18 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 			if err := updateCertificate(logger, certPath, domain, vaultClient, haproxyClient); err != nil {
 				errs = append(errs, err)
 				logger.Errorf("[%s] %v", endpoint, err)
-				certmetrics.CertificatesUpdateFailures.WithLabelValues(domain).Inc()
+				certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
 			} else {
-				certmetrics.CertificatesUpdatedOnDisk.WithLabelValues(domain).Set(1)
-				certmetrics.HAProxyCertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
+				certmetrics.CertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
 				logger.Infof("[%s] Certificate %s updated successfully!", endpoint, certPath)
 			}
 		} else {
 			logger.Infof("[%s] Certificate %s is up to date", endpoint, certPath)
 		}
 	}
+
+	// Record expiring certificates count
+	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
 
 	return errors.Join(errs...)
 }
