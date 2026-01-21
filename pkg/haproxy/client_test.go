@@ -408,7 +408,7 @@ func newMockDataPlaneAPI(t *testing.T) *mockDataPlaneAPI {
 			return
 		}
 
-		// Try prefix matching for dynamic paths (e.g., /v3/services/haproxy/runtime/certs/example.com.pem)
+		// Try prefix matching for dynamic paths (e.g., /v2/services/haproxy/runtime/certs/example.com.pem)
 		for pattern, handler := range m.handlers {
 			if strings.HasPrefix(key, pattern) {
 				handler(w, r)
@@ -506,7 +506,7 @@ func TestListCertificates(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tt.statusCode)
 				if tt.response != nil {
@@ -616,7 +616,7 @@ kF7B68QUswmVK4Icz6zBgmo=
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates/"+tt.certPath, func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates/"+tt.certPath, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
 				if tt.statusCode == http.StatusOK {
 					_, _ = w.Write([]byte(tt.pemData))
@@ -689,7 +689,7 @@ func TestUpdateCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("PUT", "/v3/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("PUT", "/v2/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
 				// Verify content type is multipart
 				contentType := r.Header.Get("Content-Type")
 				if !strings.Contains(contentType, "multipart/form-data") {
@@ -776,7 +776,7 @@ func TestCreateCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("POST", "/v3/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("POST", "/v2/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
 				// Verify content type is multipart
 				contentType := r.Header.Get("Content-Type")
 				if !strings.Contains(contentType, "multipart/form-data") {
@@ -861,7 +861,7 @@ func TestDeleteCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("DELETE", "/v3/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("DELETE", "/v2/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
 			})
 
@@ -890,7 +890,7 @@ func TestBasicAuth(t *testing.T) {
 	defer mock.Close()
 	mock.SetAuth("admin", "secret")
 
-	mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+	mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode([]SSLCertificateEntry{})

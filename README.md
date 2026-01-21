@@ -59,7 +59,7 @@ Certificatee uses the HAProxy Data Plane API to update certificates at runtime w
 - **Basic authentication**: Authenticate using username/password credentials
 - **Automatic retries**: Connections are retried with exponential backoff (default: 3 retries, 1-30s delays)
 - **Graceful degradation**: If one HAProxy instance is unreachable, the tool continues updating reachable instances
-- **REST API**: Certificates are managed via the `/v3/services/haproxy/runtime/certs` endpoints
+- **REST API**: Certificates are managed via the `/v2/services/haproxy/runtime/certs` endpoints
 
 ### HAProxy Data Plane API Configuration
 
