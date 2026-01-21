@@ -381,11 +381,13 @@ func (c *Client) GetCertificateInfoByPath(filePath, displayName string) (*CertIn
 
 // GetCertificateInfoByRef retrieves detailed information using a CertificateRef
 func (c *Client) GetCertificateInfoByRef(ref CertificateRef) (*CertInfo, error) {
-	filePath := ref.FilePath
-	if filePath == "" {
-		filePath = ref.DisplayName
+	// Use DisplayName (storage_name) for API lookup, as the HAProxy Data Plane API
+	// storage endpoint expects the storage name, not the full filesystem path
+	lookupPath := ref.DisplayName
+	if lookupPath == "" {
+		lookupPath = ref.FilePath
 	}
-	return c.GetCertificateInfoByPath(filePath, ref.DisplayName)
+	return c.GetCertificateInfoByPath(lookupPath, ref.DisplayName)
 }
 
 // parsePEMCertificate parses a PEM certificate and extracts certificate info
