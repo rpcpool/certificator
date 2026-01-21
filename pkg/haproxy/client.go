@@ -304,7 +304,7 @@ func (c *Client) ListCertificates() ([]string, error) {
 // ListCertificateRefs returns a list of certificate references with both display names and file paths
 func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 	// Use storage API endpoint for listing SSL certificates
-	resp, err := c.doRequest("GET", "/v3/services/haproxy/storage/ssl_certificates", nil, "")
+	resp, err := c.doRequest("GET", "/v2/services/haproxy/storage/ssl_certificates", nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +348,7 @@ func (c *Client) GetCertificateInfo(certName string) (*CertInfo, error) {
 func (c *Client) GetCertificateInfoByPath(filePath, displayName string) (*CertInfo, error) {
 	// URL-encode the file path for the API request
 	encodedPath := url.PathEscape(filePath)
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s", encodedPath)
+	path := fmt.Sprintf("/v2/services/haproxy/storage/ssl_certificates/%s", encodedPath)
 	resp, err := c.doRequest("GET", path, nil, "")
 	if err != nil {
 		return nil, err
@@ -454,7 +454,7 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 	}
 
 	// Send PUT request to replace certificate
-	path := fmt.Sprintf("/v3/services/haproxy/runtime/certs/%s", certName)
+	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
 	resp, err := c.doRequestWithBodyBuffer("PUT", path, buf.Bytes(), writer.FormDataContentType())
 	if err != nil {
 		return err
@@ -490,7 +490,7 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 	}
 
 	// Send POST request to create certificate
-	resp, err := c.doRequestWithBodyBuffer("POST", "/v3/services/haproxy/runtime/certs", buf.Bytes(), writer.FormDataContentType())
+	resp, err := c.doRequestWithBodyBuffer("POST", "/v2/services/haproxy/runtime/certs", buf.Bytes(), writer.FormDataContentType())
 	if err != nil {
 		return err
 	}
@@ -507,7 +507,7 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 
 // DeleteCertificate deletes a certificate entry via Data Plane API
 func (c *Client) DeleteCertificate(certName string) error {
-	path := fmt.Sprintf("/v3/services/haproxy/runtime/certs/%s", certName)
+	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
 	resp, err := c.doRequest("DELETE", path, nil, "")
 	if err != nil {
 		return err

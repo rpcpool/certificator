@@ -199,7 +199,7 @@ EOF
 
     # Wait for API to be ready
     local retries=30
-    while ! curl -sf http://127.0.0.1:5555/v3/services/haproxy/runtime/info -u admin:adminpwd > /dev/null 2>&1; do
+    while ! curl -sf http://127.0.0.1:5555/v2/services/haproxy/runtime/info -u admin:adminpwd > /dev/null 2>&1; do
         retries=$((retries - 1))
         if [[ ${retries} -le 0 ]]; then
             log_error "Data Plane API failed to start. Logs:"
@@ -301,25 +301,25 @@ test_api_connectivity() {
     # First, check API info endpoint
     log_info "Checking API info..."
     local info
-    info=$(curl -s http://127.0.0.1:5555/v3/info -u admin:adminpwd) || true
+    info=$(curl -s http://127.0.0.1:5555/v2/info -u admin:adminpwd) || true
     echo "API Info: ${info}"
 
     # Check available endpoints
     log_info "Checking runtime info..."
     local runtime_info
-    runtime_info=$(curl -s http://127.0.0.1:5555/v3/services/haproxy/runtime/info -u admin:adminpwd) || true
+    runtime_info=$(curl -s http://127.0.0.1:5555/v2/services/haproxy/runtime/info -u admin:adminpwd) || true
     echo "Runtime Info: ${runtime_info}"
 
     # Try to list certificates via storage endpoint
     log_info "Checking storage certs endpoint..."
     local storage_certs
-    storage_certs=$(curl -s http://127.0.0.1:5555/v3/services/haproxy/storage/ssl_certificates -u admin:adminpwd) || true
+    storage_certs=$(curl -s http://127.0.0.1:5555/v2/services/haproxy/storage/ssl_certificates -u admin:adminpwd) || true
     echo "Storage Certs: ${storage_certs}"
 
     # Check runtime certs endpoint
     log_info "Checking runtime certs endpoint..."
     local runtime_certs
-    runtime_certs=$(curl -s http://127.0.0.1:5555/v3/services/haproxy/runtime/certs -u admin:adminpwd) || true
+    runtime_certs=$(curl -s http://127.0.0.1:5555/v2/services/haproxy/runtime/certs -u admin:adminpwd) || true
     echo "Runtime Certs: ${runtime_certs}"
 
     if echo "${runtime_certs}" | grep -q "404"; then
