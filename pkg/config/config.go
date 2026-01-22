@@ -63,7 +63,7 @@ type Certificatee struct {
 	// HAProxyDataPlaneAPIUser is the username for HAProxy Data Plane API basic auth
 	HAProxyDataPlaneAPIUser string `envconfig:"HAPROXY_DATAPLANE_API_USER"`
 	// HAProxyDataPlaneAPIPassword is the password for HAProxy Data Plane API basic auth
-	HAProxyDataPlaneAPIPassword string `envconfig:"HAPROXY_DATAPLANE_API_PASSWORD""`
+	HAProxyDataPlaneAPIPassword string `envconfig:"HAPROXY_DATAPLANE_API_PASSWORD"`
 	// HAProxyDataPlaneAPIInsecure skips TLS certificate verification (not recommended for production)
 	HAProxyDataPlaneAPIInsecure bool `envconfig:"HAPROXY_DATAPLANE_API_INSECURE" default:"false"`
 }

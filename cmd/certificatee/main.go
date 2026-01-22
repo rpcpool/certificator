@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -111,35 +109,28 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		certPath := ref.DisplayName
 		logger.Infof("[%s] Checking certificate: %s", endpoint, certPath)
 
-		// Get certificate info from HAProxy using the file path
-		haproxyCertInfo, err := haproxyClient.GetCertificateInfoByRef(ref)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("failed to get certificate info for %s: %w", certPath, err))
-			logger.Errorf("[%s] %v", endpoint, err)
-			continue
-		}
-
 		// Extract domain name from certificate path
 		domain := haproxy.ExtractDomainFromPath(certPath)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
 
-		// Track expiring certificates
-		if haproxy.IsExpiring(haproxyCertInfo, cfg.Certificatee.RenewBeforeDays) {
-			expiringCount++
-		}
-
-		// Check if certificate needs update
-		shouldUpdate, reason, err := shouldUpdateCertificate(logger, haproxyCertInfo, domain, vaultClient, cfg.Certificatee.RenewBeforeDays)
+		// Check if certificate needs update (uses Vault as source of truth for cert details,
+		// since HAProxy Data Plane API doesn't provide certificate metadata)
+		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, cfg.Certificatee.RenewBeforeDays)
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
 			continue
 		}
 
+		// Track expiring certificates
+		if isExpiring {
+			expiringCount++
+		}
+
 		if shouldUpdate {
 			logger.Infof("[%s] Certificate %s needs update: %s", endpoint, certPath, reason)
 
-			if err := updateCertificate(logger, certPath, domain, vaultClient, haproxyClient); err != nil {
+			if err := updateCertificate(certPath, domain, vaultClient, haproxyClient); err != nil {
 				errs = append(errs, err)
 				logger.Errorf("[%s] %v", endpoint, err)
 				certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
@@ -158,49 +149,31 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	return errors.Join(errs...)
 }
 
-func shouldUpdateCertificate(logger *logrus.Logger, haproxyCertInfo *haproxy.CertInfo, domain string, vaultClient *vault.VaultClient, renewBeforeDays int) (bool, string, error) {
-	// Get certificate from Vault
+func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
+	// Get certificate from Vault - this is the source of truth for certificate details
+	// (HAProxy Data Plane API doesn't provide certificate metadata like expiry or serial)
 	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
 	if err != nil {
-		return false, "", fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
+		return false, "", false, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
 	}
 
 	if vaultCert == nil {
-		return false, "", fmt.Errorf("certificate for %s does not exist in vault", domain)
+		return false, "", false, fmt.Errorf("certificate for %s does not exist in vault", domain)
 	}
 
-	// Check if HAProxy certificate is expiring
-	if haproxy.IsExpiring(haproxyCertInfo, renewBeforeDays) {
-		return true, fmt.Sprintf("certificate expires on %s (within %d days)", haproxyCertInfo.NotAfter.Format(time.RFC3339), renewBeforeDays), nil
+	// Check if Vault certificate is expiring
+	threshold := time.Now().AddDate(0, 0, renewBeforeDays)
+	isExpiring = vaultCert.NotAfter.Before(threshold)
+
+	if isExpiring {
+		// Certificate is expiring, sync to HAProxy (likely was recently renewed)
+		return true, fmt.Sprintf("certificate expires on %s (within %d days)", vaultCert.NotAfter.Format(time.RFC3339), renewBeforeDays), true, nil
 	}
 
-	// Compare serial numbers
-	if serialsDiffer(haproxyCertInfo, vaultCert) {
-		return true, fmt.Sprintf("serial mismatch: HAProxy=%s, Vault=%s",
-			haproxyCertInfo.Serial, formatSerial(vaultCert.SerialNumber.Bytes())), nil
-	}
-
-	return false, "", nil
+	return false, "", false, nil
 }
 
-// serialsDiffer compares the serial numbers of HAProxy and Vault certificates
-func serialsDiffer(haproxyCertInfo *haproxy.CertInfo, vaultCert *x509.Certificate) bool {
-	if haproxyCertInfo == nil || vaultCert == nil {
-		return true
-	}
-
-	haproxySerial := haproxy.NormalizeSerial(haproxyCertInfo.Serial)
-	vaultSerial := haproxy.NormalizeSerial(formatSerial(vaultCert.SerialNumber.Bytes()))
-
-	return haproxySerial != vaultSerial
-}
-
-// formatSerial converts a certificate serial number to hex string
-func formatSerial(serial []byte) string {
-	return hex.EncodeToString(serial)
-}
-
-func updateCertificate(logger *logrus.Logger, certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
+func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
 	// Read certificate data from Vault
 	certificateSecrets, err := vaultClient.KVRead(certificate.VaultCertLocation(domain))
 	if err != nil {
