@@ -16,7 +16,7 @@ import (
 	"github.com/vinted/certificator/pkg/vault"
 )
 
-func syncCmd(_ []string) {
+func syncCmd() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		cfg.Log.Logger.Fatal(err)

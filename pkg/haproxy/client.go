@@ -20,13 +20,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Default retry configuration
-const (
-	DefaultMaxRetries     = 3
-	DefaultRetryBaseDelay = 1 * time.Second
-	DefaultRetryMaxDelay  = 30 * time.Second
-)
-
 // CertInfo holds certificate information from HAProxy Data Plane API
 type CertInfo struct {
 	Filename     string    `json:"file"`
@@ -84,7 +77,7 @@ func NewClient(cfg ClientConfig, logger *logrus.Logger) (*Client, error) {
 	}
 
 	httpClient := retryablehttp.NewClient()
-	httpClient.Logger = logger
+	httpClient.Logger = &logrusLeveledLogger{logger: logger}
 	httpClient.HTTPClient.Transport = transport
 	httpClient.HTTPClient.Timeout = timeout
 
@@ -432,4 +425,38 @@ func IsExpiring(certInfo *CertInfo, renewBeforeDays int) bool {
 func NormalizeSerial(serial string) string {
 	re := regexp.MustCompile(`[^a-fA-F0-9]`)
 	return strings.ToUpper(re.ReplaceAllString(serial, ""))
+}
+
+// logrusLeveledLogger wraps a logrus.Logger to implement retryablehttp.LeveledLogger
+type logrusLeveledLogger struct {
+	logger *logrus.Logger
+}
+
+func (l *logrusLeveledLogger) Error(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Error(msg)
+}
+
+func (l *logrusLeveledLogger) Info(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Info(msg)
+}
+
+func (l *logrusLeveledLogger) Debug(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Debug(msg)
+}
+
+func (l *logrusLeveledLogger) Warn(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Warn(msg)
+}
+
+// toLogrusFields converts key-value pairs to logrus.Fields
+func toLogrusFields(keysAndValues []any) logrus.Fields {
+	fields := logrus.Fields{}
+	for i := 0; i+1 < len(keysAndValues); i += 2 {
+		key, ok := keysAndValues[i].(string)
+		if !ok {
+			continue
+		}
+		fields[key] = keysAndValues[i+1]
+	}
+	return fields
 }
