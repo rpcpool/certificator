@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -173,25 +171,6 @@ func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, rene
 	}
 
 	return false, "", false, nil
-}
-
-// serialsDiffer compares the serial numbers of HAProxy and Vault certificates
-// Note: This function is kept for backwards compatibility, but is no longer used
-// since HAProxy Data Plane API doesn't provide certificate metadata
-func serialsDiffer(haproxyCertInfo *haproxy.CertInfo, vaultCert *x509.Certificate) bool {
-	if haproxyCertInfo == nil || vaultCert == nil {
-		return true
-	}
-
-	haproxySerial := haproxy.NormalizeSerial(haproxyCertInfo.Serial)
-	vaultSerial := haproxy.NormalizeSerial(formatSerial(vaultCert.SerialNumber.Bytes()))
-
-	return haproxySerial != vaultSerial
-}
-
-// formatSerial converts a certificate serial number to hex string
-func formatSerial(serial []byte) string {
-	return hex.EncodeToString(serial)
 }
 
 func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
