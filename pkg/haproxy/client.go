@@ -3,14 +3,11 @@ package haproxy
 import (
 	"bytes"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -20,21 +17,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// CertInfo holds certificate information from HAProxy Data Plane API
+// CertInfo holds certificate information.
+// Note: HAProxy Data Plane API only returns Filename and StorageName.
+// Other fields (NotAfter, Serial) are only populated when parsing PEM data directly.
 type CertInfo struct {
-	Filename     string    `json:"file"`
-	StorageName  string    `json:"storage_name"`
-	Status       string    `json:"status"`
-	Serial       string    `json:"serial"`
-	NotBefore    time.Time `json:"-"`
-	NotBeforeStr string    `json:"not_before"`
-	NotAfter     time.Time `json:"-"`
-	NotAfterStr  string    `json:"not_after"`
-	Subject      string    `json:"subject"`
-	Issuer       string    `json:"issuer"`
-	Algorithm    string    `json:"algorithm"`
-	SHA1         string    `json:"sha1_fingerprint"`
-	SANs         []string  `json:"subject_alternative_names"`
+	Filename    string    `json:"file"`
+	StorageName string    `json:"storage_name"`
+	NotAfter    time.Time `json:"-"`
+	Serial      string    `json:"serial"`
 }
 
 // Client is a HAProxy Data Plane API client
@@ -207,103 +197,6 @@ func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 	return refs, nil
 }
 
-// GetCertificateInfo retrieves detailed information about a specific certificate by name
-func (c *Client) GetCertificateInfo(certName string) (*CertInfo, error) {
-	return c.GetCertificateInfoByPath(certName, certName)
-}
-
-// GetCertificateInfoByPath retrieves detailed information about a certificate using its file path
-func (c *Client) GetCertificateInfoByPath(filePath, displayName string) (*CertInfo, error) {
-	// URL-encode the file path for the API request
-	encodedPath := url.PathEscape(filePath)
-	path := fmt.Sprintf("/v2/services/haproxy/storage/ssl_certificates/%s", encodedPath)
-	resp, err := c.doRequest("GET", path, nil, "")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, errors.Errorf("certificate %s not found", displayName)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("failed to get certificate info: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	// The storage API returns the PEM content directly
-	pemData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read certificate data")
-	}
-
-	// Parse the PEM certificate to extract info
-	info, err := parsePEMCertificate(pemData, displayName)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse certificate")
-	}
-
-	return info, nil
-}
-
-// GetCertificateInfoByRef retrieves detailed information using a CertificateRef
-func (c *Client) GetCertificateInfoByRef(ref CertificateRef) (*CertInfo, error) {
-	// Use FilePath for API lookup, as the HAProxy Data Plane API v2 storage endpoint
-	// expects the full file path, not the storage name
-	lookupPath := ref.FilePath
-	if lookupPath == "" {
-		lookupPath = ref.DisplayName
-	}
-	return c.GetCertificateInfoByPath(lookupPath, ref.DisplayName)
-}
-
-// parsePEMCertificate parses a PEM certificate and extracts certificate info
-func parsePEMCertificate(pemData []byte, certName string) (*CertInfo, error) {
-	block, _ := pem.Decode(pemData)
-	if block == nil {
-		return nil, errors.New("failed to decode PEM block")
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse X.509 certificate")
-	}
-
-	info := &CertInfo{
-		StorageName: certName,
-		Subject:     cert.Subject.String(),
-		Issuer:      cert.Issuer.String(),
-		Serial:      cert.SerialNumber.Text(16),
-		NotBefore:   cert.NotBefore,
-		NotAfter:    cert.NotAfter,
-		SANs:        cert.DNSNames,
-	}
-
-	return info, nil
-}
-
-// parseDataPlaneAPITime parses time strings from Data Plane API
-func parseDataPlaneAPITime(s string) (time.Time, error) {
-	// Data Plane API may return time in various formats
-	formats := []string{
-		time.RFC3339,
-		"2006-01-02T15:04:05Z",
-		"Jan 2 15:04:05 2006 MST",
-		"Jan 02 15:04:05 2006 MST",
-		"Jan _2 15:04:05 2006 MST",
-	}
-
-	for _, format := range formats {
-		t, err := time.Parse(format, s)
-		if err == nil {
-			return t, nil
-		}
-	}
-
-	return time.Time{}, fmt.Errorf("failed to parse time: %s", s)
-}
-
 // UpdateCertificate uploads and commits a certificate update via Data Plane API
 func (c *Client) UpdateCertificate(certName, pemData string) error {
 	// Create multipart form data
@@ -434,19 +327,19 @@ type logrusLeveledLogger struct {
 	logger *logrus.Logger
 }
 
-func (l *logrusLeveledLogger) Error(msg string, keysAndValues ...interface{}) {
+func (l *logrusLeveledLogger) Error(msg string, keysAndValues ...any) {
 	l.logger.WithFields(toLogrusFields(keysAndValues)).Error(msg)
 }
 
-func (l *logrusLeveledLogger) Info(msg string, keysAndValues ...interface{}) {
+func (l *logrusLeveledLogger) Info(msg string, keysAndValues ...any) {
 	l.logger.WithFields(toLogrusFields(keysAndValues)).Info(msg)
 }
 
-func (l *logrusLeveledLogger) Debug(msg string, keysAndValues ...interface{}) {
+func (l *logrusLeveledLogger) Debug(msg string, keysAndValues ...any) {
 	l.logger.WithFields(toLogrusFields(keysAndValues)).Debug(msg)
 }
 
-func (l *logrusLeveledLogger) Warn(msg string, keysAndValues ...interface{}) {
+func (l *logrusLeveledLogger) Warn(msg string, keysAndValues ...any) {
 	l.logger.WithFields(toLogrusFields(keysAndValues)).Warn(msg)
 }
 
