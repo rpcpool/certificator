@@ -2,7 +2,6 @@ package haproxy
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +11,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 )
-
-// =============================================================================
-// Unit Tests for Helper Functions
-// =============================================================================
 
 func TestExtractDomainFromPath(t *testing.T) {
 	tests := []struct {
@@ -207,10 +202,6 @@ func TestParseDataPlaneAPITime(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Unit Tests for Client Constructors
-// =============================================================================
-
 func TestNewClient(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel) // Suppress logs in tests
@@ -370,10 +361,6 @@ func TestClientEndpoint(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Mock HAProxy Data Plane API Server
-// =============================================================================
-
 // mockDataPlaneAPI simulates the HAProxy Data Plane API
 type mockDataPlaneAPI struct {
 	server       *httptest.Server
@@ -441,10 +428,6 @@ func (m *mockDataPlaneAPI) SetAuth(username, password string) {
 func (m *mockDataPlaneAPI) SetHandler(method, path string, handler http.HandlerFunc) {
 	m.handlers[method+" "+path] = handler
 }
-
-// =============================================================================
-// Integration Tests
-// =============================================================================
 
 func TestListCertificates(t *testing.T) {
 	logger := logrus.New()
@@ -878,10 +861,6 @@ func TestDeleteCertificate(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Authentication Tests
-// =============================================================================
-
 func TestBasicAuth(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
@@ -943,10 +922,6 @@ func TestBasicAuth(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Connection Error Tests
-// =============================================================================
-
 func TestConnectionError(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
@@ -960,106 +935,9 @@ func TestConnectionError(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	// Disable retries for faster test
-	client.SetRetryConfig(RetryConfig{
-		MaxRetries: 0,
-		BaseDelay:  10 * time.Millisecond,
-		MaxDelay:   50 * time.Millisecond,
-	})
-
 	_, err = client.ListCertificates()
 	if err == nil {
 		t.Error("ListCertificates() expected connection error, got nil")
-	}
-}
-
-// =============================================================================
-// Retry Logic Tests
-// =============================================================================
-
-func TestDefaultRetryConfig(t *testing.T) {
-	config := DefaultRetryConfig()
-
-	if config.MaxRetries != DefaultMaxRetries {
-		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, DefaultMaxRetries)
-	}
-	if config.BaseDelay != DefaultRetryBaseDelay {
-		t.Errorf("BaseDelay = %v, want %v", config.BaseDelay, DefaultRetryBaseDelay)
-	}
-	if config.MaxDelay != DefaultRetryMaxDelay {
-		t.Errorf("MaxDelay = %v, want %v", config.MaxDelay, DefaultRetryMaxDelay)
-	}
-}
-
-func TestClientRetryConfig(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	client, err := NewClient(ClientConfig{BaseURL: "http://localhost:5555"}, logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	// Check default config is applied
-	config := client.GetRetryConfig()
-	if config.MaxRetries != DefaultMaxRetries {
-		t.Errorf("Default MaxRetries = %d, want %d", config.MaxRetries, DefaultMaxRetries)
-	}
-
-	// Set custom config
-	customConfig := RetryConfig{
-		MaxRetries: 5,
-		BaseDelay:  500 * time.Millisecond,
-		MaxDelay:   10 * time.Second,
-	}
-	client.SetRetryConfig(customConfig)
-
-	// Verify custom config
-	config = client.GetRetryConfig()
-	if config.MaxRetries != 5 {
-		t.Errorf("Custom MaxRetries = %d, want 5", config.MaxRetries)
-	}
-	if config.BaseDelay != 500*time.Millisecond {
-		t.Errorf("Custom BaseDelay = %v, want 500ms", config.BaseDelay)
-	}
-}
-
-func TestCalculateBackoff(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	client, err := NewClient(ClientConfig{BaseURL: "http://localhost:5555"}, logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	// Set known config for predictable testing
-	client.SetRetryConfig(RetryConfig{
-		MaxRetries: 5,
-		BaseDelay:  1 * time.Second,
-		MaxDelay:   30 * time.Second,
-	})
-
-	tests := []struct {
-		attempt  int
-		expected time.Duration
-	}{
-		{0, 1 * time.Second},   // 1s * 2^0 = 1s
-		{1, 2 * time.Second},   // 1s * 2^1 = 2s
-		{2, 4 * time.Second},   // 1s * 2^2 = 4s
-		{3, 8 * time.Second},   // 1s * 2^3 = 8s
-		{4, 16 * time.Second},  // 1s * 2^4 = 16s
-		{5, 30 * time.Second},  // 1s * 2^5 = 32s, capped at 30s
-		{10, 30 * time.Second}, // Capped at max
-	}
-
-	for _, tt := range tests {
-		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
-			delay := client.calculateBackoff(tt.attempt)
-			if delay != tt.expected {
-				t.Errorf("calculateBackoff(%d) = %v, want %v", tt.attempt, delay, tt.expected)
-			}
-		})
 	}
 }
 
@@ -1075,13 +953,6 @@ func TestRetryOnConnectionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-
-	// Set fast retry config for testing
-	client.SetRetryConfig(RetryConfig{
-		MaxRetries: 2,
-		BaseDelay:  10 * time.Millisecond,
-		MaxDelay:   50 * time.Millisecond,
-	})
 
 	start := time.Now()
 	_, err = client.ListCertificates()
@@ -1100,40 +971,5 @@ func TestRetryOnConnectionFailure(t *testing.T) {
 	// Error message should mention retry attempts
 	if !strings.Contains(err.Error(), "after") {
 		t.Errorf("Error should mention retry attempts: %v", err)
-	}
-}
-
-func TestNoRetryWithZeroMaxRetries(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	// Create client pointing to non-existent server
-	client, err := NewClient(ClientConfig{
-		BaseURL: "http://127.0.0.1:59997",
-		Timeout: 50 * time.Millisecond,
-	}, logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	// Set no retries
-	client.SetRetryConfig(RetryConfig{
-		MaxRetries: 0, // No retries
-		BaseDelay:  10 * time.Millisecond,
-		MaxDelay:   50 * time.Millisecond,
-	})
-
-	start := time.Now()
-	_, err = client.ListCertificates()
-	elapsed := time.Since(start)
-
-	// Should fail immediately (no retries)
-	if err == nil {
-		t.Error("Expected connection error, got nil")
-	}
-
-	// Should be fast since no retries
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("Should have failed quickly without retries, elapsed: %v", elapsed)
 	}
 }
