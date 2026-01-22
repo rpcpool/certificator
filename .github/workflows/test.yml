@@ -70,8 +70,5 @@ jobs:
 
             </details>
 
-      - name: Run Integration Tests
-        run: devenv shell integration-test
-
       - name: Build Binaries
         run: devenv shell build

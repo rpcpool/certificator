@@ -8,7 +8,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -16,32 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
-
-// Default retry configuration
-const (
-	DefaultMaxRetries     = 3
-	DefaultRetryBaseDelay = 1 * time.Second
-	DefaultRetryMaxDelay  = 30 * time.Second
-)
-
-// RetryConfig holds retry configuration for HAProxy connections
-type RetryConfig struct {
-	MaxRetries int           // Maximum number of retry attempts (0 = no retries)
-	BaseDelay  time.Duration // Initial delay between retries
-	MaxDelay   time.Duration // Maximum delay between retries (for exponential backoff)
-}
-
-// DefaultRetryConfig returns the default retry configuration
-func DefaultRetryConfig() RetryConfig {
-	return RetryConfig{
-		MaxRetries: DefaultMaxRetries,
-		BaseDelay:  DefaultRetryBaseDelay,
-		MaxDelay:   DefaultRetryMaxDelay,
-	}
-}
 
 // CertInfo holds certificate information from HAProxy Data Plane API
 type CertInfo struct {
@@ -62,13 +39,12 @@ type CertInfo struct {
 
 // Client is a HAProxy Data Plane API client
 type Client struct {
-	baseURL     string
-	username    string
-	password    string
-	httpClient  *http.Client
-	logger      *logrus.Logger
-	retryConfig RetryConfig
-	timeout     time.Duration
+	baseURL    string
+	username   string
+	password   string
+	httpClient *http.Client
+	logger     *logrus.Logger
+	timeout    time.Duration
 }
 
 // ClientConfig holds configuration for creating a new Client
@@ -100,17 +76,18 @@ func NewClient(cfg ClientConfig, logger *logrus.Logger) (*Client, error) {
 		},
 	}
 
+	httpClient := retryablehttp.NewClient()
+	httpClient.Logger = &logrusLeveledLogger{logger: logger}
+	httpClient.HTTPClient.Transport = transport
+	httpClient.HTTPClient.Timeout = timeout
+
 	return &Client{
-		baseURL:  cfg.BaseURL,
-		username: cfg.Username,
-		password: cfg.Password,
-		httpClient: &http.Client{
-			Timeout:   timeout,
-			Transport: transport,
-		},
-		logger:      logger,
-		retryConfig: DefaultRetryConfig(),
-		timeout:     timeout,
+		baseURL:    cfg.BaseURL,
+		username:   cfg.Username,
+		password:   cfg.Password,
+		httpClient: httpClient.StandardClient(),
+		logger:     logger,
+		timeout:    timeout,
 	}, nil
 }
 
@@ -144,132 +121,23 @@ func (c *Client) Endpoint() string {
 	return c.baseURL
 }
 
-// SetRetryConfig sets the retry configuration for this client
-func (c *Client) SetRetryConfig(config RetryConfig) {
-	c.retryConfig = config
-}
-
-// GetRetryConfig returns the current retry configuration
-func (c *Client) GetRetryConfig() RetryConfig {
-	return c.retryConfig
-}
-
-// calculateBackoff calculates the delay for the given retry attempt using exponential backoff
-func (c *Client) calculateBackoff(attempt int) time.Duration {
-	if attempt <= 0 {
-		return c.retryConfig.BaseDelay
-	}
-
-	// Exponential backoff: baseDelay * 2^attempt
-	delay := float64(c.retryConfig.BaseDelay) * math.Pow(2, float64(attempt))
-
-	// Cap at max delay
-	if delay > float64(c.retryConfig.MaxDelay) {
-		delay = float64(c.retryConfig.MaxDelay)
-	}
-
-	return time.Duration(delay)
-}
-
 // doRequest performs an HTTP request with retry logic
 func (c *Client) doRequest(method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	var lastErr error
 	url := c.baseURL + path
 
-	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
-		if attempt > 0 {
-			delay := c.calculateBackoff(attempt - 1)
-			c.logger.Debugf("Retry %d/%d for %s after %v", attempt, c.retryConfig.MaxRetries, c.baseURL, delay)
-			time.Sleep(delay)
-		}
-
-		// Need to recreate body for retries if it was consumed
-		var reqBody io.Reader
-		if body != nil {
-			// Read body into buffer for potential retries
-			if attempt == 0 {
-				reqBody = body
-			} else {
-				// Body was already consumed, skip retry with body
-				reqBody = nil
-			}
-		}
-
-		// Create request
-		req, err := http.NewRequest(method, url, reqBody)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create request")
-		}
-
-		// Set headers
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-		}
-		if c.username != "" {
-			req.SetBasicAuth(c.username, c.password)
-		}
-
-		// Execute request
-		resp, err := c.httpClient.Do(req)
-		if err == nil {
-			if attempt > 0 {
-				c.logger.Infof("Successfully connected to %s after %d retries", c.baseURL, attempt)
-			}
-			return resp, nil
-		}
-
-		lastErr = err
-		c.logger.Debugf("Request attempt %d failed for %s: %v", attempt+1, c.baseURL, err)
+	// Create request
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create request")
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
 	}
 
-	return nil, errors.Wrapf(lastErr, "failed to connect to HAProxy Data Plane API at %s after %d attempts", c.baseURL, c.retryConfig.MaxRetries+1)
-}
-
-// doRequestWithBodyBuffer performs an HTTP request with retry logic, buffering body for retries
-func (c *Client) doRequestWithBodyBuffer(method, path string, bodyData []byte, contentType string) (*http.Response, error) {
-	var lastErr error
-	url := c.baseURL + path
-
-	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
-		if attempt > 0 {
-			delay := c.calculateBackoff(attempt - 1)
-			c.logger.Debugf("Retry %d/%d for %s after %v", attempt, c.retryConfig.MaxRetries, c.baseURL, delay)
-			time.Sleep(delay)
-		}
-
-		// Create request with fresh body reader
-		var body io.Reader
-		if bodyData != nil {
-			body = bytes.NewReader(bodyData)
-		}
-
-		req, err := http.NewRequest(method, url, body)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create request")
-		}
-
-		// Set headers
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-		}
-		if c.username != "" {
-			req.SetBasicAuth(c.username, c.password)
-		}
-
-		// Execute request
-		resp, err := c.httpClient.Do(req)
-		if err == nil {
-			if attempt > 0 {
-				c.logger.Infof("Successfully connected to %s after %d retries", c.baseURL, attempt)
-			}
-			return resp, nil
-		}
-
-		lastErr = err
-		c.logger.Debugf("Request attempt %d failed for %s: %v", attempt+1, c.baseURL, err)
-	}
-
-	return nil, errors.Wrapf(lastErr, "failed to connect to HAProxy Data Plane API at %s after %d attempts", c.baseURL, c.retryConfig.MaxRetries+1)
+	return c.httpClient.Do(req)
 }
 
 // SSLCertificateEntry represents an SSL certificate entry from storage API
@@ -457,7 +325,7 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 
 	// Send PUT request to replace certificate
 	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
-	resp, err := c.doRequestWithBodyBuffer("PUT", path, buf.Bytes(), writer.FormDataContentType())
+	resp, err := c.doRequest("PUT", path, &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
 	}
@@ -492,7 +360,7 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 	}
 
 	// Send POST request to create certificate
-	resp, err := c.doRequestWithBodyBuffer("POST", "/v2/services/haproxy/runtime/certs", buf.Bytes(), writer.FormDataContentType())
+	resp, err := c.doRequest("POST", "/v2/services/haproxy/runtime/certs", &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
 	}
@@ -559,4 +427,38 @@ func IsExpiring(certInfo *CertInfo, renewBeforeDays int) bool {
 func NormalizeSerial(serial string) string {
 	re := regexp.MustCompile(`[^a-fA-F0-9]`)
 	return strings.ToUpper(re.ReplaceAllString(serial, ""))
+}
+
+// logrusLeveledLogger wraps a logrus.Logger to implement retryablehttp.LeveledLogger
+type logrusLeveledLogger struct {
+	logger *logrus.Logger
+}
+
+func (l *logrusLeveledLogger) Error(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Error(msg)
+}
+
+func (l *logrusLeveledLogger) Info(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Info(msg)
+}
+
+func (l *logrusLeveledLogger) Debug(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Debug(msg)
+}
+
+func (l *logrusLeveledLogger) Warn(msg string, keysAndValues ...interface{}) {
+	l.logger.WithFields(toLogrusFields(keysAndValues)).Warn(msg)
+}
+
+// toLogrusFields converts key-value pairs to logrus.Fields
+func toLogrusFields(keysAndValues []any) logrus.Fields {
+	fields := logrus.Fields{}
+	for i := 0; i+1 < len(keysAndValues); i += 2 {
+		key, ok := keysAndValues[i].(string)
+		if !ok {
+			continue
+		}
+		fields[key] = keysAndValues[i+1]
+	}
+	return fields
 }

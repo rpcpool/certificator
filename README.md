@@ -12,7 +12,7 @@ The main certificate issuing tool that manages certificates through ACME (Let's 
 
 ### Certificatee
 
-A tool that synchronizes certificates from Vault to HAProxy using the HAProxy Data Plane API. It monitors certificates loaded in HAProxy and updates them when:
+A daemon that synchronizes certificates from Vault to HAProxy using the HAProxy Data Plane API. It monitors certificates loaded in HAProxy and updates them when:
 - The certificate is expiring within the configured threshold (default: 30 days)
 - The certificate serial number differs from the one stored in Vault
 

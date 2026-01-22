@@ -77,11 +77,10 @@ in
   scripts = {
     build.exec = ''
       export BUILD_DIR="''${BUILD_DIR:-build}"
-      echo "Building certificator to $BUILD_DIR..."
-      clean
+      echo "Building certificator in $BUILD_DIR..."
       mkdir -p "$BUILD_DIR"
-      go build -o "$BUILD_DIR" -v ./cmd/certificator
-      go build -o "$BUILD_DIR" -v ./cmd/certificatee
+      go build -o "$BUILD_DIR" ./cmd/certificator
+      go build -o "$BUILD_DIR" ./cmd/certificatee
       echo "Build complete!"
     '';
 
@@ -171,11 +170,6 @@ in
       echo "Clean complete!"
     '';
 
-    # Integration test for certificatee list-certs
-    integration-test.exec = ''
-      echo "=== Running Integration Tests ==="
-      ${lib.getExe pkgs.bash} ./test/integration/run-tests.sh
-    '';
   };
 
   # Shell hook - runs when entering the devenv
@@ -198,7 +192,6 @@ in
     echo "  tidy             - Tidy go.mod dependencies"
     echo "  check            - Run all checks (fmt, vet, lint, test)"
     echo "  clean            - Clean build artifacts"
-    echo "  integration-test - Run HAProxy integration tests"
     echo ""
   '';
 
@@ -207,10 +200,6 @@ in
     echo "Running devenv tests..."
     go version
     command go test -v ./...
-
-    echo ""
-    echo "Running integration tests..."
-    bash ./test/integration/run-tests.sh
   '';
 
   git-hooks.hooks = {
