@@ -7,6 +7,7 @@ import (
 
 	legoLog "github.com/go-acme/lego/v4/log"
 	"github.com/sirupsen/logrus"
+	"github.com/sourcegraph/conc/pool"
 	"github.com/vinted/certificator/pkg/certificate"
 	"github.com/vinted/certificator/pkg/certmetrics"
 	"github.com/vinted/certificator/pkg/config"
@@ -70,19 +71,23 @@ func main() {
 }
 
 func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClients []*haproxy.Client) error {
-	var allErrs []error
+	p := pool.New().WithErrors()
 
 	for _, haproxyClient := range haproxyClients {
-		endpoint := haproxyClient.Endpoint()
-		logger.Infof("Processing HAProxy endpoint: %s", endpoint)
+		client := haproxyClient // capture for closure
+		p.Go(func() error {
+			endpoint := client.Endpoint()
+			logger.Infof("Processing HAProxy endpoint: %s", endpoint)
 
-		if err := processHAProxyEndpoint(logger, cfg, vaultClient, haproxyClient); err != nil {
-			allErrs = append(allErrs, fmt.Errorf("endpoint %s: %w", endpoint, err))
-			logger.Errorf("Failed to process endpoint %s: %v", endpoint, err)
-		}
+			if err := processHAProxyEndpoint(logger, cfg, vaultClient, client); err != nil {
+				logger.Errorf("Failed to process endpoint %s: %v", endpoint, err)
+				return fmt.Errorf("endpoint %s: %w", endpoint, err)
+			}
+			return nil
+		})
 	}
 
-	return errors.Join(allErrs...)
+	return p.Wait()
 }
 
 func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
