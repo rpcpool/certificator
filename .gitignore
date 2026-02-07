@@ -15,25 +15,11 @@ build/
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
-# Devenv
-.devenv*
-devenv.local.nix
-
 # direnv
 .direnv
 
 # pre-commit
 .pre-commit-config.yaml
+
 # Added by goreleaser init:
 dist/
-
-# Devenv
-.devenv*
-devenv.local.nix
-devenv.local.yaml
-
-# direnv
-.direnv
-
-# pre-commit
-.pre-commit-config.yaml

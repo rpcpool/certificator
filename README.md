@@ -110,10 +110,17 @@ Not an exhaustive list; refer to the source code for all metrics.
 
 ## Development
 
-### Using devenv
+### Using Nix
 
-The project includes a `devenv.nix` for development.
-You can also just go build stuff.
+The project includes a `flake.nix` for development. Enter the development shell with:
+
+```bash
+nix develop
+```
+
+Or use [direnv](https://direnv.net/) for automatic shell activation.
+
+You can also just go build stuff without Nix.
 
 ### Running Tests
 

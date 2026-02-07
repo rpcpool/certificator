@@ -27,14 +27,11 @@ jobs:
       - name: Setup Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
 
-      - name: Install devenv
-        run: nix profile add nixpkgs#devenv
-
       - name: Run Checks (lint, vet, test)
-        run: devenv shell check
+        run: nix develop --command check
 
       - name: Generate Coverage Report
-        run: devenv shell test-coverage
+        run: nix develop --command test-coverage
 
       - name: Extract Coverage Data
         if: github.event_name == 'pull_request'
@@ -42,12 +39,12 @@ jobs:
         run: |
           {
             echo 'report<<EOF'
-            devenv shell -- go tool cover -func=coverage.out | tail -1
+            nix develop --command go tool cover -func=coverage.out | tail -1
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
           {
             echo 'details<<EOF'
-            devenv shell -- go tool cover -func=coverage.out
+            nix develop --command go tool cover -func=coverage.out
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -71,4 +68,4 @@ jobs:
             </details>
 
       - name: Build Binaries
-        run: devenv shell build
+        run: nix develop --command build
