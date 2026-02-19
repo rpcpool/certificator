@@ -69,12 +69,15 @@ func main() {
 			if err != nil {
 				failedDomains = append(failedDomains, mainDomain)
 				certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
+				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
 				logger.Error(err)
 				continue
 			}
 			certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
+			certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "renewed").Inc()
 			logger.Infof("certificate for %s renewed successfully", mainDomain)
 		} else {
+			certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "valid").Inc()
 			logger.Infof("certificate for %s is up to date, skipping renewal", mainDomain)
 		}
 	}
