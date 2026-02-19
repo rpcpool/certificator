@@ -28,6 +28,10 @@ var (
 		Name: "certificator_certificates_renewal_failures_total",
 		Help: "Total number of certificate renewal failures",
 	}, []string{"domain"})
+	CertificatesChecked = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificator_certificates_checked_total",
+		Help: "Total number of certificates checked",
+	}, []string{"domain", "status"})
 
 	// Certificatee metrics - certificate updates and expiry
 	CertificatesUpdated = promauto.NewCounterVec(prometheus.CounterOpts{
