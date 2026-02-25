@@ -41,16 +41,17 @@ type Metrics struct {
 
 // Config contains all configuration parameters
 type Config struct {
-	Hostname        string
-	Acme            Acme
-	Vault           Vault
-	Log             Log
-	Metrics         Metrics
-	Certificatee    Certificatee
-	DNSAddress      string   `envconfig:"DNS_ADDRESS" default:"127.0.0.1:53"`
-	Environment     string   `envconfig:"ENVIRONMENT" default:"prod"`
-	RenewBeforeDays int      `envconfig:"CERTIFICATOR_RENEW_BEFORE_DAYS" default:"30"`
-	Domains         []string `envconfig:"CERTIFICATOR_DOMAINS" default:""`
+	Hostname              string
+	Acme                  Acme
+	Vault                 Vault
+	Log                   Log
+	Metrics               Metrics
+	Certificatee          Certificatee
+	DNSAddress            string   `envconfig:"DNS_ADDRESS" default:"127.0.0.1:53"`
+	Environment           string   `envconfig:"ENVIRONMENT" default:"prod"`
+	RenewBeforeDays       int      `envconfig:"CERTIFICATOR_RENEW_BEFORE_DAYS" default:"30"`
+	Domains               []string `envconfig:"CERTIFICATOR_DOMAINS" default:""`
+	MaxConcurrentRenewals int      `envconfig:"CERTIFICATOR_MAX_CONCURRENT_RENEWALS" default:"5"`
 }
 
 // Configuration values specific to the certificatee tool

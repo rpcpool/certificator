@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"strings"
 
 	legoLog "github.com/go-acme/lego/v4/log"
+	"github.com/sourcegraph/conc/pool"
 	"github.com/vinted/certificator/pkg/acme"
 	"github.com/vinted/certificator/pkg/certificate"
 	"github.com/vinted/certificator/pkg/certmetrics"
@@ -42,47 +44,46 @@ func main() {
 	certmetrics.Up.WithLabelValues("certificator", version, cfg.Hostname, cfg.Environment).Set(1)
 	defer certmetrics.Up.WithLabelValues("certificator", version, cfg.Hostname, cfg.Environment).Set(0)
 
-	var failedDomains []string
+	ctx := context.Background()
+	workerPool := pool.New().WithErrors().WithContext(ctx).WithMaxGoroutines(cfg.MaxConcurrentRenewals)
 
 	for _, dom := range cfg.Domains {
-		allDomains := strings.Split(dom, ",")
-		mainDomain := allDomains[0]
-		cert, err := certificate.GetCertificate(mainDomain, vaultClient)
-		if err != nil {
-			failedDomains = append(failedDomains, mainDomain)
-			logger.Error(err)
-			continue
-		}
-		logger.Infof("checking certificate for %s", mainDomain)
-
-		needsReissuing, err := certificate.NeedsReissuing(cert, allDomains, cfg.RenewBeforeDays, logger)
-		if err != nil {
-			failedDomains = append(failedDomains, mainDomain)
-			logger.Error(err)
-			continue
-		}
-
-		if needsReissuing {
-			logger.Infof("obtaining certificate for %s", mainDomain)
-			err := certificate.ObtainCertificate(acmeClient, vaultClient, allDomains,
-				cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement)
+		workerPool.Go(func(ctx context.Context) error {
+			allDomains := strings.Split(dom, ",")
+			mainDomain := allDomains[0]
+			cert, err := certificate.GetCertificate(mainDomain, vaultClient)
 			if err != nil {
-				failedDomains = append(failedDomains, mainDomain)
-				certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
-				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
-				logger.Error(err)
-				continue
+				return err
 			}
-			certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
-			certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "renewed").Inc()
-			logger.Infof("certificate for %s renewed successfully", mainDomain)
-		} else {
-			certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "valid").Inc()
-			logger.Infof("certificate for %s is up to date, skipping renewal", mainDomain)
-		}
+			logger.Infof("checking certificate for %s", mainDomain)
+
+			needsReissuing, err := certificate.NeedsReissuing(cert, allDomains, cfg.RenewBeforeDays, logger)
+			if err != nil {
+				return err
+			}
+
+			if needsReissuing {
+				logger.Infof("obtaining certificate for %s", mainDomain)
+				err := certificate.ObtainCertificate(acmeClient, vaultClient, allDomains,
+					cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement)
+				if err != nil {
+					certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
+					certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
+					return err
+				}
+				certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
+				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "renewed").Inc()
+				logger.Infof("certificate for %s renewed successfully", mainDomain)
+			} else {
+				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "valid").Inc()
+				logger.Infof("certificate for %s is up to date, skipping renewal", mainDomain)
+			}
+
+			return nil
+		})
 	}
 
-	if len(failedDomains) > 0 {
-		logger.Fatalf("Failed to renew certificates for: %v", failedDomains)
+	if err := workerPool.Wait(); err != nil {
+		logger.Fatal(err)
 	}
 }
