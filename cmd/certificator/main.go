@@ -62,22 +62,22 @@ func main() {
 				return err
 			}
 
-			if needsReissuing {
-				logger.Infof("obtaining certificate for %s", mainDomain)
-				err := certificate.ObtainCertificate(acmeClient, vaultClient, allDomains,
-					cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement)
-				if err != nil {
-					certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
-					certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
-					return err
-				}
-				certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
-				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "renewed").Inc()
-				logger.Infof("certificate for %s renewed successfully", mainDomain)
-			} else {
+			if !needsReissuing {
 				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "valid").Inc()
 				logger.Infof("certificate for %s is up to date, skipping renewal", mainDomain)
+				return nil
 			}
+
+			logger.Infof("obtaining certificate for %s", mainDomain)
+			if err := certificate.ObtainCertificate(acmeClient, vaultClient, allDomains,
+				cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement); err != nil {
+				certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
+				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
+				return err
+			}
+			certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
+			certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "renewed").Inc()
+			logger.Infof("certificate for %s renewed successfully", mainDomain)
 
 			return nil
 		})
