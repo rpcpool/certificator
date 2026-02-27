@@ -73,25 +73,28 @@
 
       in
       {
-        checks.integration = pkgs.stdenv.mkDerivation {
-          name = "integration-tests";
+        checks.integration = pkgs.buildGoModule {
+          pname = "certificator-integration-tests";
+          version = "0.0.0";
           src = ./.;
+
+          vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+          subPackages = [ "cmd/certificatee" ];
+
           nativeBuildInputs = [
-            pkgs.go
             pkgs.haproxy
             dataplaneapi
             pkgs.openssl
           ];
-          dontBuild = true;
+
           doCheck = true;
           checkPhase = ''
             export HOME=$TMPDIR
             export GOCACHE=$TMPDIR/go-build
-            export GOMODCACHE=$TMPDIR/go-mod
             export PATH=${pkgs.haproxy}/bin:${dataplaneapi}/bin:$PATH
             go test -tags=integration ./cmd/certificatee
           '';
-          installPhase = "mkdir -p $out";
         };
 
         devShells.default = pkgs.devshell.mkShell {
