@@ -58,6 +58,8 @@ type Config struct {
 type Certificatee struct {
 	UpdateInterval  time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"10m"`
 	RenewBeforeDays int           `envconfig:"CERTIFICATEE_RENEW_BEFORE_DAYS" default:"30"`
+	// LocalCertsDir points to a directory with <domain>.pem bundles (cert + key) to use instead of Vault.
+	LocalCertsDir string `envconfig:"CERTIFICATEE_LOCAL_CERTS_DIR" default:""`
 	// HAProxyDataPlaneAPIURLs is a comma-separated list of HAProxy Data Plane API URLs
 	// Example: "http://127.0.0.1:5555,https://haproxy2.local:5555"
 	HAProxyDataPlaneAPIURLs []string `envconfig:"HAPROXY_DATAPLANE_API_URLS" default:"127.0.0.1:5555"`

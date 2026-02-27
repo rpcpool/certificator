@@ -28,6 +28,7 @@ A daemon that synchronizes certificates from Vault to HAProxy using the HAProxy 
 | `HAPROXY_DATAPLANE_API_INSECURE` | `false` | Skip TLS certificate verification for HTTPS connections |
 | `CERTIFICATEE_UPDATE_INTERVAL` | `24h` | How often to check certificates for updates |
 | `CERTIFICATEE_RENEW_BEFORE_DAYS` | `30` | Update certificates expiring within this many days |
+| `CERTIFICATEE_LOCAL_CERTS_DIR` | | Directory containing `<domain>.pem` bundles (cert + key) to use instead of Vault |
 | `VAULT_APPROLE_ROLE_ID` | (required) | Vault AppRole Role ID |
 | `NOMAD_TOKEN` | (required) | Used as Vault AppRole Secret ID |
 | `VAULT_KV_STORAGE_PATH` | `secret/data/certificator/` | Vault KV storage path for certificates |
@@ -36,6 +37,8 @@ A daemon that synchronizes certificates from Vault to HAProxy using the HAProxy 
 | `LOG_FORMAT` | `JSON` | Log format: `JSON` or `LOGFMT` |
 | `LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `ENVIRONMENT` | `prod` | Environment name for metrics labels |
+
+If `CERTIFICATEE_LOCAL_CERTS_DIR` is set, Vault configuration is optional and certificates are read from local PEM bundles instead.
 
 ### Certificator Environment Variables
 
@@ -59,7 +62,7 @@ Certificatee uses the HAProxy Data Plane API to update certificates at runtime w
 - **Basic authentication**: Authenticate using username/password credentials
 - **Automatic retries**: Connections are retried with exponential backoff (default: 3 retries, 1-30s delays)
 - **Graceful degradation**: If one HAProxy instance is unreachable, the tool continues updating reachable instances
-- **REST API**: Certificates are managed via the `/v2/services/haproxy/runtime/certs` endpoints
+- **REST API**: Certificates are managed via the `/v2/services/haproxy/storage/ssl_certificates` endpoints
 
 ### HAProxy Data Plane API Configuration
 

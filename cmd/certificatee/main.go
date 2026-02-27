@@ -3,11 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	legoLog "github.com/go-acme/lego/v4/log"
 	"github.com/sirupsen/logrus"
-	"github.com/vinted/certificator/pkg/certificate"
 	"github.com/vinted/certificator/pkg/certmetrics"
 	"github.com/vinted/certificator/pkg/config"
 	"github.com/vinted/certificator/pkg/haproxy"
@@ -35,10 +36,17 @@ func main() {
 	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
 	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
-	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
-		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)
-	if err != nil {
-		logger.Fatal(err)
+	var certSource CertSource
+	if cfg.Certificatee.LocalCertsDir != "" {
+		certSource = LocalCertSource{dir: cfg.Certificatee.LocalCertsDir}
+		logger.Warnf("Using local certificate directory: %s", cfg.Certificatee.LocalCertsDir)
+	} else {
+		vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
+			cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)
+		if err != nil {
+			logger.Fatal(err)
+		}
+		certSource = VaultCertSource{client: vaultClient}
 	}
 
 	haproxyClients, err := createHAProxyClients(cfg, logger)
@@ -58,25 +66,25 @@ func main() {
 	defer certmetrics.Up.WithLabelValues("certificatee", version, cfg.Hostname, cfg.Environment).Set(0)
 
 	// Initial run
-	if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
+	if err := maybeUpdateCertificates(logger, cfg, certSource, haproxyClients); err != nil {
 		logger.Error(err)
 	}
 
 	for range ticker.C {
-		if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
+		if err := maybeUpdateCertificates(logger, cfg, certSource, haproxyClients); err != nil {
 			logger.Error(err)
 		}
 	}
 }
 
-func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClients []*haproxy.Client) error {
+func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, certSource CertSource, haproxyClients []*haproxy.Client) error {
 	var allErrs []error
 
 	for _, haproxyClient := range haproxyClients {
 		endpoint := haproxyClient.Endpoint()
 		logger.Infof("Processing HAProxy endpoint: %s", endpoint)
 
-		if err := processHAProxyEndpoint(logger, cfg, vaultClient, haproxyClient); err != nil {
+		if err := processHAProxyEndpoint(logger, cfg, certSource, haproxyClient); err != nil {
 			allErrs = append(allErrs, fmt.Errorf("endpoint %s: %w", endpoint, err))
 			logger.Errorf("Failed to process endpoint %s: %v", endpoint, err)
 		}
@@ -85,7 +93,7 @@ func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClie
 	return errors.Join(allErrs...)
 }
 
-func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
+func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, certSource CertSource, haproxyClient *haproxy.Client) error {
 	endpoint := haproxyClient.Endpoint()
 
 	// Get list of certificates from HAProxy with file paths for lookups
@@ -107,15 +115,18 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 	for _, ref := range certRefs {
 		certPath := ref.DisplayName
+		if certPath == "" {
+			certPath = filepath.Base(ref.FilePath)
+		}
 		logger.Infof("[%s] Checking certificate: %s", endpoint, certPath)
 
 		// Extract domain name from certificate path
 		domain := haproxy.ExtractDomainFromPath(certPath)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
 
-		// Check if certificate needs update (uses Vault as source of truth for cert details,
+		// Check if certificate needs update (uses certificate source as truth for cert details,
 		// since HAProxy Data Plane API doesn't provide certificate metadata)
-		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, cfg.Certificatee.RenewBeforeDays)
+		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, certSource, cfg.Certificatee.RenewBeforeDays)
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
@@ -130,7 +141,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		if shouldUpdate {
 			logger.Infof("[%s] Certificate %s needs update: %s", endpoint, certPath, reason)
 
-			if err := updateCertificate(certPath, domain, vaultClient, haproxyClient); err != nil {
+			if err := updateCertificate(ref, domain, certSource, haproxyClient); err != nil {
 				errs = append(errs, err)
 				logger.Errorf("[%s] %v", endpoint, err)
 				certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
@@ -149,16 +160,16 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	return errors.Join(errs...)
 }
 
-func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
-	// Get certificate from Vault - this is the source of truth for certificate details
+func shouldUpdateCertificate(domain string, certSource CertSource, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
+	// Get certificate from source - this is the source of truth for certificate details
 	// (HAProxy Data Plane API doesn't provide certificate metadata like expiry or serial)
-	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
+	vaultCert, err := certSource.GetCertificate(domain)
 	if err != nil {
-		return false, "", false, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
+		return false, "", false, fmt.Errorf("failed to get certificate %s from source: %w", domain, err)
 	}
 
 	if vaultCert == nil {
-		return false, "", false, fmt.Errorf("certificate for %s does not exist in vault", domain)
+		return false, "", false, fmt.Errorf("certificate for %s does not exist in source", domain)
 	}
 
 	// Check if Vault certificate is expiring
@@ -173,51 +184,31 @@ func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, rene
 	return false, "", false, nil
 }
 
-func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
-	// Read certificate data from Vault
-	certificateSecrets, err := vaultClient.KVRead(certificate.VaultCertLocation(domain))
-	if err != nil {
-		return fmt.Errorf("failed to read certificate data from vault for %s: %w", domain, err)
-	}
-
+func updateCertificate(ref haproxy.CertificateRef, domain string, certSource CertSource, haproxyClient *haproxy.Client) error {
 	// Build PEM bundle (certificate + private key)
-	pemData, err := buildPEMBundle(certificateSecrets)
+	pemData, err := certSource.GetPEMBundle(domain)
 	if err != nil {
-		return fmt.Errorf("failed to build PEM bundle for %s: %w", domain, err)
+		return fmt.Errorf("failed to load PEM bundle for %s: %w", domain, err)
 	}
 
-	// Update certificate in HAProxy
-	if err := haproxyClient.UpdateCertificate(certPath, pemData); err != nil {
-		return fmt.Errorf("failed to update certificate %s in HAProxy: %w", certPath, err)
+	certName := ref.DisplayName
+	if certName == "" {
+		certName = filepath.Base(ref.FilePath)
+	}
+
+	if strings.Contains(certName, "*") || strings.Contains(ref.FilePath, "*") {
+		if err := ensureStorageCertificate(haproxyClient, sanitizeWildcardCertName(certName), pemData); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Update certificate in HAProxy (storage API)
+	if err := haproxyClient.UpdateCertificate(certName, pemData); err != nil {
+		return fmt.Errorf("failed to update certificate %s in HAProxy: %w", certName, err)
 	}
 
 	return nil
-}
-
-// buildPEMBundle creates a PEM bundle from Vault certificate secrets
-func buildPEMBundle(secrets map[string]any) (string, error) {
-	var pemData string
-
-	// Add certificate
-	if cert, ok := secrets["certificate"].(string); ok && cert != "" {
-		pemData += cert
-	} else {
-		return "", fmt.Errorf("certificate not found in vault secrets")
-	}
-
-	// Add newline between cert and key
-	if !endsWith(pemData, "\n") {
-		pemData += "\n"
-	}
-
-	// Add private key
-	if key, ok := secrets["private_key"].(string); ok && key != "" {
-		pemData += key
-	} else {
-		return "", fmt.Errorf("private_key not found in vault secrets")
-	}
-
-	return pemData, nil
 }
 
 // endsWith checks if a string ends with a suffix
