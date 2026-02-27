@@ -138,6 +138,20 @@ type SSLCertificateEntry struct {
 	Description string `json:"description"`
 }
 
+// SSLCertificateDetails represents an SSL certificate entry with metadata.
+type SSLCertificateDetails struct {
+	File        string
+	StorageName string
+	Description string
+	Serial      string
+	NotBefore   time.Time
+	NotAfter    time.Time
+	Domains     []string
+	Issuers     []string
+	Subject     string
+	Size        int64
+}
+
 // CertificateRef holds both display name and file path for a certificate
 type CertificateRef struct {
 	// DisplayName is the storage_name or filename for display purposes
@@ -204,6 +218,68 @@ func (c *Client) listCertificateRefsV2() ([]SSLCertificateEntry, error) {
 	}
 
 	return certs, nil
+}
+
+func (c *Client) GetCertificateDetails(certName string) (*SSLCertificateDetails, error) {
+	path := fmt.Sprintf("/v2/services/haproxy/storage/ssl_certificates/%s", certName)
+	resp, err := c.doRequest("GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, errors.Errorf("failed to get certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		File        string          `json:"file"`
+		StorageName string          `json:"storage_name"`
+		Description string          `json:"description"`
+		Serial      string          `json:"serial"`
+		NotBefore   string          `json:"not_before"`
+		NotAfter    string          `json:"not_after"`
+		Domains     json.RawMessage `json:"domains"`
+		Issuers     json.RawMessage `json:"issuers"`
+		Subject     string          `json:"subject"`
+		Size        int64           `json:"size"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, errors.Wrap(err, "failed to decode certificate details")
+	}
+
+	notBefore, err := parseDataPlaneTime(payload.NotBefore)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse not_before")
+	}
+	notAfter, err := parseDataPlaneTime(payload.NotAfter)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse not_after")
+	}
+
+	domains, err := parseStringOrArray(payload.Domains)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse domains")
+	}
+	issuers, err := parseStringOrArray(payload.Issuers)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse issuers")
+	}
+
+	return &SSLCertificateDetails{
+		File:        payload.File,
+		StorageName: payload.StorageName,
+		Description: payload.Description,
+		Serial:      payload.Serial,
+		NotBefore:   notBefore,
+		NotAfter:    notAfter,
+		Domains:     domains,
+		Issuers:     issuers,
+		Subject:     payload.Subject,
+		Size:        payload.Size,
+	}, nil
 }
 
 // UpdateCertificate uploads and commits a certificate update via Data Plane API
@@ -403,6 +479,46 @@ func IsExpiring(certInfo *CertInfo, renewBeforeDays int) bool {
 func NormalizeSerial(serial string) string {
 	re := regexp.MustCompile(`[^a-fA-F0-9]`)
 	return strings.ToUpper(re.ReplaceAllString(serial, ""))
+}
+
+func parseDataPlaneTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, errors.New("empty time value")
+	}
+	layouts := []string{
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05 -0700 MST",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, errors.Errorf("unsupported time format %q", value)
+}
+
+func parseStringOrArray(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list, nil
+	}
+
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		if single == "" {
+			return nil, nil
+		}
+		return []string{single}, nil
+	}
+
+	return nil, errors.Errorf("unsupported value %s", string(raw))
 }
 
 // logrusLeveledLogger wraps a logrus.Logger to implement retryablehttp.LeveledLogger

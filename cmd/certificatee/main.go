@@ -124,9 +124,14 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, certSource
 		domain := haproxy.ExtractDomainFromPath(certPath)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
 
-		// Check if certificate needs update (uses certificate source as truth for cert details,
-		// since HAProxy Data Plane API doesn't provide certificate metadata)
-		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, certSource, cfg.Certificatee.RenewBeforeDays)
+		certName := certPath
+		if strings.Contains(certName, "*") || strings.Contains(ref.FilePath, "*") {
+			certName = sanitizeWildcardCertName(certName)
+		}
+
+		// Check if certificate needs update by comparing certificate source to
+		// Data Plane API metadata for the stored certificate.
+		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, certName, certSource, haproxyClient, cfg.Certificatee.RenewBeforeDays)
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
@@ -160,7 +165,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, certSource
 	return errors.Join(errs...)
 }
 
-func shouldUpdateCertificate(domain string, certSource CertSource, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
+func shouldUpdateCertificate(domain, certName string, certSource CertSource, haproxyClient *haproxy.Client, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
 	// Get certificate from source - this is the source of truth for certificate details
 	// (HAProxy Data Plane API doesn't provide certificate metadata like expiry or serial)
 	vaultCert, err := certSource.GetCertificate(domain)
@@ -172,9 +177,24 @@ func shouldUpdateCertificate(domain string, certSource CertSource, renewBeforeDa
 		return false, "", false, fmt.Errorf("certificate for %s does not exist in source", domain)
 	}
 
-	// Check if Vault certificate is expiring
+	// Check if source certificate is expiring
 	threshold := time.Now().AddDate(0, 0, renewBeforeDays)
 	isExpiring = vaultCert.NotAfter.Before(threshold)
+
+	storedCert, err := haproxyClient.GetCertificateDetails(certName)
+	if err != nil {
+		return false, "", false, fmt.Errorf("failed to get certificate %s metadata: %w", certName, err)
+	}
+
+	sourceSerial := haproxy.NormalizeSerial(vaultCert.SerialNumber.Text(16))
+	storedSerial := haproxy.NormalizeSerial(storedCert.Serial)
+	if sourceSerial != storedSerial {
+		return true, fmt.Sprintf("serial differs (source %s vs haproxy %s)", sourceSerial, storedSerial), isExpiring, nil
+	}
+
+	if !vaultCert.NotAfter.Equal(storedCert.NotAfter) {
+		return true, fmt.Sprintf("expiry differs (source %s vs haproxy %s)", vaultCert.NotAfter.Format(time.RFC3339), storedCert.NotAfter.Format(time.RFC3339)), isExpiring, nil
+	}
 
 	if isExpiring {
 		// Certificate is expiring, sync to HAProxy (likely was recently renewed)

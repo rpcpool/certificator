@@ -132,6 +132,111 @@ backend be
 	waitForServerSerialMatch(t, opensslPath, fmt.Sprintf("127.0.0.1:%d", haproxyPort), domain, localSerial, 20*time.Second)
 }
 
+func TestCertificateeUpdatesCertWhenMetadataDiffers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+
+	haproxyPath := requireLookPath(t, "haproxy")
+	dataplanePath := requireLookPath(t, "dataplaneapi")
+	opensslPath := requireLookPath(t, "openssl")
+
+	tempDir := t.TempDir()
+	certsDir := filepath.Join(tempDir, "haproxy-certs")
+	localCertsDir := filepath.Join(tempDir, "local-certs")
+	mapsDir := filepath.Join(tempDir, "maps")
+	spoeDir := filepath.Join(tempDir, "spoe")
+	storageDir := filepath.Join(tempDir, "storage")
+	runDir := mustMakeShortTempDir(t, "/tmp", "certificator-it-")
+	mustMkdirAll(t, certsDir, localCertsDir, mapsDir, spoeDir, storageDir)
+
+	domain := "example-metadata"
+	haproxyCertPath := filepath.Join(certsDir, domain+".pem")
+	localCertPath := filepath.Join(localCertsDir, domain+".pem")
+
+	haproxyCertPEM, haproxySerial := mustSelfSignedPEM(t, domain, time.Now().Add(365*24*time.Hour), big.NewInt(101))
+	localCertPEM, localSerial := mustSelfSignedPEM(t, domain, time.Now().Add(365*24*time.Hour), big.NewInt(102))
+	if haproxySerial == localSerial {
+		t.Fatalf("expected different serials for test certificates")
+	}
+
+	mustWriteFile(t, haproxyCertPath, haproxyCertPEM)
+	mustWriteFile(t, localCertPath, localCertPEM)
+
+	haproxyPort := freePort(t)
+	socketPath := filepath.Join(runDir, "haproxy.sock")
+	pidPath := filepath.Join(runDir, "haproxy.pid")
+	haproxyCfgPath := filepath.Join(tempDir, "haproxy.cfg")
+	haproxyCfg := fmt.Sprintf(`global
+  log stdout format raw local0
+  stats socket %s mode 600 level admin
+  maxconn 256
+userlist controller
+  user admin insecure-password admin
+defaults
+  mode http
+  timeout connect 5s
+  timeout client 5s
+  timeout server 5s
+frontend fe_tls
+  bind 127.0.0.1:%d ssl crt %s
+  default_backend be
+backend be
+  server s1 127.0.0.1:8080
+`, socketPath, haproxyPort, haproxyCertPath) + "\n"
+	mustWriteFile(t, haproxyCfgPath, []byte(haproxyCfg))
+
+	_, haproxyLogs := startProcess(t, haproxyPath, []string{"-f", haproxyCfgPath, "-db", "-p", pidPath}, nil, "")
+	waitForSocket(t, socketPath, 5*time.Second, haproxyLogs)
+
+	reloadScript := mustWriteReloadScript(t, tempDir, haproxyPath, haproxyCfgPath, pidPath)
+	dataplaneCfgPath := filepath.Join(tempDir, "dataplaneapi.yaml")
+	dataplaneArgs := []string{
+		"-f", dataplaneCfgPath,
+		"--scheme", "http",
+		"--host", "127.0.0.1",
+		"--config-file", haproxyCfgPath,
+		"--haproxy-bin", haproxyPath,
+		"--userlist", "controller",
+		"--ssl-certs-dir", certsDir,
+		"--general-storage-dir", storageDir,
+		"--maps-dir", mapsDir,
+		"--spoe-dir", spoeDir,
+		"--reload-strategy", "custom",
+		"--reload-cmd", reloadScript,
+		"--restart-cmd", reloadScript,
+		"--log-level", "info",
+	}
+	_, dataplaneLogs := startProcess(t, dataplanePath, dataplaneArgs, nil, "")
+	apiURL := waitForDataPlaneURL(t, dataplaneLogs, 20*time.Second)
+	waitForDataPlaneAPI(t, apiURL, "admin", "admin", domain+".pem", dataplaneLogs)
+
+	pkgDir := mustGetwd(t)
+	repoRoot := filepath.Clean(filepath.Join(pkgDir, "../.."))
+	certificateeBin := filepath.Join(tempDir, "certificatee")
+	buildCmd := exec.Command("go", "build", "-o", certificateeBin, "./cmd/certificatee")
+	buildCmd.Dir = repoRoot
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("failed to build certificatee: %v", err)
+	}
+
+	certificateeEnv := []string{
+		fmt.Sprintf("HAPROXY_DATAPLANE_API_URLS=%s", apiURL),
+		"HAPROXY_DATAPLANE_API_USER=admin",
+		"HAPROXY_DATAPLANE_API_PASSWORD=admin",
+		fmt.Sprintf("CERTIFICATEE_LOCAL_CERTS_DIR=%s", localCertsDir),
+		"CERTIFICATEE_RENEW_BEFORE_DAYS=30",
+		"CERTIFICATEE_UPDATE_INTERVAL=1h",
+		"LOG_LEVEL=DEBUG",
+	}
+
+	_, certificateeLogs := startProcess(t, certificateeBin, nil, certificateeEnv, repoRoot)
+	waitForSerialMatch(t, haproxyCertPath, localSerial, 10*time.Second, certificateeLogs, haproxyLogs, dataplaneLogs)
+	waitForServerSerialMatch(t, opensslPath, fmt.Sprintf("127.0.0.1:%d", haproxyPort), domain, localSerial, 20*time.Second)
+}
+
 func TestHAProxyPrefersExactCertOverWildcard(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
