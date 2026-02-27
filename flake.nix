@@ -35,16 +35,16 @@
         # HAProxy Data Plane API - built from source
         dataplaneapi = pkgs.buildGoModule rec {
           pname = "dataplaneapi";
-          version = "3.0.2";
+          version = "2.9.21";
 
           src = pkgs.fetchFromGitHub {
             owner = "haproxytech";
             repo = "dataplaneapi";
             rev = "v${version}";
-            hash = "sha256-SFI7WKPxF31b97Q4EWbsTbp3laXHcUfdg4hlFUiml5A=";
+            hash = "sha256-HDSHdrObZopQtG7qHEv/NjKLkalF7hTRyuN7Vf6lHvY=";
           };
 
-          vendorHash = "sha256-vm+NUf8OCW+jCiPY13d/MjQpy3/NxEwx7Zol2bP+eF4=";
+          vendorHash = "sha256-Mh9/C5V6Q/VJbPY4wqiXzzoZ0cs7hIqbdyTPxHe9GVA=";
 
           # Skip tests as they require network access
           doCheck = false;
@@ -73,6 +73,30 @@
 
       in
       {
+        checks.integration = pkgs.buildGoModule {
+          pname = "certificator-integration-tests";
+          version = "0.0.0";
+          src = ./.;
+
+          vendorHash = "sha256-wqQj0P3cc9NX+gIFicGQUBi4+y5Fg/CuYPeFOwvJ8Jg=";
+
+          subPackages = [ "cmd/certificatee" ];
+
+          nativeBuildInputs = [
+            pkgs.haproxy
+            dataplaneapi
+            pkgs.openssl
+          ];
+
+          doCheck = true;
+          checkPhase = ''
+            export HOME=$TMPDIR
+            export GOCACHE=$TMPDIR/go-build
+            export PATH=${pkgs.haproxy}/bin:${dataplaneapi}/bin:$PATH
+            go test -tags=integration ./cmd/certificatee
+          '';
+        };
+
         devShells.default = pkgs.devshell.mkShell {
           name = "certificator";
 
