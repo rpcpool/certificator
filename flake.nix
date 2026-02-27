@@ -78,7 +78,7 @@
           version = "0.0.0";
           src = ./.;
 
-          vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          vendorHash = "sha256-wqQj0P3cc9NX+gIFicGQUBi4+y5Fg/CuYPeFOwvJ8Jg=";
 
           subPackages = [ "cmd/certificatee" ];
 
