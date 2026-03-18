@@ -2,6 +2,7 @@ package haproxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -322,7 +323,18 @@ func newMockDataPlaneAPI(t *testing.T) *mockDataPlaneAPI {
 			return
 		}
 
-		// Try prefix matching for dynamic paths (e.g., /v2/services/haproxy/runtime/certs/example.com.pem)
+		// Provide default version detection responses if not overridden
+		if r.Method == "GET" && r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method == "GET" && r.URL.Path == "/v2/services/haproxy/storage/ssl_certificates" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+
+		// Try prefix matching for dynamic paths
 		for pattern, handler := range m.handlers {
 			if strings.HasPrefix(key, pattern) {
 				handler(w, r)
@@ -354,6 +366,50 @@ func (m *mockDataPlaneAPI) SetAuth(username, password string) {
 
 func (m *mockDataPlaneAPI) SetHandler(method, path string, handler http.HandlerFunc) {
 	m.handlers[method+" "+path] = handler
+}
+
+func TestAPIVersionDetection(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	t.Run("detects v3", func(t *testing.T) {
+		mock := newMockDataPlaneAPI(t)
+		defer mock.Close()
+
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+		})
+
+		client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if client.APIVersion() != 3 {
+			t.Errorf("APIVersion() = %d, want 3", client.APIVersion())
+		}
+	})
+
+	t.Run("detects v2 fallback", func(t *testing.T) {
+		mock := newMockDataPlaneAPI(t)
+		defer mock.Close()
+
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+		mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+		})
+
+		client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if client.APIVersion() != 2 {
+			t.Errorf("APIVersion() = %d, want 2", client.APIVersion())
+		}
+	})
 }
 
 func TestListCertificates(t *testing.T) {
@@ -415,6 +471,11 @@ func TestListCertificates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
+
+			// Version detection mock
+			mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			})
 
 			mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -796,4 +857,114 @@ func TestRetryOnConnectionFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "after") {
 		t.Errorf("Error should mention retry attempts: %v", err)
 	}
+}
+
+func TestGetCertificateBody(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	certName := "example.com.pem"
+	pemData := "-----BEGIN CERTIFICATE-----\nv3-data\n-----END CERTIFICATE-----"
+
+	t.Run("success v3 raw body", func(t *testing.T) {
+		mock := newMockDataPlaneAPI(t)
+		defer mock.Close()
+
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+		})
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates/"+certName, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(pemData))
+		})
+
+		client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		got, err := client.GetCertificateBody(certName)
+		if err != nil {
+			t.Errorf("GetCertificateBody() error = %v", err)
+		}
+		if got != pemData {
+			t.Errorf("GetCertificateBody() = %q, want %q", got, pemData)
+		}
+	})
+
+	t.Run("success v3 JSON body", func(t *testing.T) {
+		mock := newMockDataPlaneAPI(t)
+		defer mock.Close()
+
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+		})
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates/"+certName, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"data": %q}`, pemData)
+		})
+
+		client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		got, err := client.GetCertificateBody(certName)
+		if err != nil {
+			t.Errorf("GetCertificateBody() error = %v", err)
+		}
+		if got != pemData {
+			t.Errorf("GetCertificateBody() = %q, want %q", got, pemData)
+		}
+	})
+
+	t.Run("error v2 fallback", func(t *testing.T) {
+		mock := newMockDataPlaneAPI(t)
+		defer mock.Close()
+
+		// Defaults to v2 fallback because /v3 returns 404 by default in newMockDataPlaneAPI
+
+		client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.GetCertificateBody(certName)
+		if err == nil {
+			t.Error("GetCertificateBody() expected error on v2, got nil")
+		}
+	})
+}
+
+func TestDeleteStorageCertificate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	certName := "delete-me.pem"
+
+	t.Run("success v3", func(t *testing.T) {
+		mock := newMockDataPlaneAPI(t)
+		defer mock.Close()
+
+		mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+		})
+		mock.SetHandler("DELETE", "/v3/services/haproxy/storage/ssl_certificates/"+certName, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+
+		client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		err = client.DeleteStorageCertificate(certName)
+		if err != nil {
+			t.Errorf("DeleteStorageCertificate() error = %v", err)
+		}
+	})
 }

@@ -53,14 +53,22 @@ func GetCertificate(domain string, vault *vault.VaultClient) (*x509.Certificate,
 		return nil, err
 	}
 	if cert, ok := secrets["certificate"].(string); ok {
-		parsedCert, err := certcrypto.ParsePEMBundle([]byte(cert))
-		if err != nil {
-			return nil, err
-		}
-		return parsedCert[0], nil
+		return ParsePEMCertificate(cert)
 	}
 
 	return nil, nil
+}
+
+// ParsePEMCertificate parses a PEM-encoded certificate bundle and returns the first certificate
+func ParsePEMCertificate(pemData string) (*x509.Certificate, error) {
+	parsedCert, err := certcrypto.ParsePEMBundle([]byte(pemData))
+	if err != nil {
+		return nil, err
+	}
+	if len(parsedCert) == 0 {
+		return nil, fmt.Errorf("no certificates found in PEM bundle")
+	}
+	return parsedCert[0], nil
 }
 
 // NeedsReissuing checks if certificate domains and required domains match

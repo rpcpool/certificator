@@ -35,6 +35,7 @@ type Client struct {
 	httpClient *http.Client
 	logger     *logrus.Logger
 	timeout    time.Duration
+	apiVersion int
 }
 
 // ClientConfig holds configuration for creating a new Client
@@ -71,14 +72,52 @@ func NewClient(cfg ClientConfig, logger *logrus.Logger) (*Client, error) {
 	httpClient.HTTPClient.Transport = transport
 	httpClient.HTTPClient.Timeout = timeout
 
-	return &Client{
+	client := &Client{
 		baseURL:    cfg.BaseURL,
 		username:   cfg.Username,
 		password:   cfg.Password,
 		httpClient: httpClient.StandardClient(),
 		logger:     logger,
 		timeout:    timeout,
-	}, nil
+	}
+
+	client.detectAPIVersion()
+	return client, nil
+}
+
+// detectAPIVersion tries to detect the HAProxy Data Plane API version
+func (c *Client) detectAPIVersion() {
+	// Try v3 first
+	resp, err := c.doRequest("GET", "/v3/services/haproxy/storage/ssl_certificates", nil, "")
+	if err == nil && resp.StatusCode == http.StatusOK {
+		c.apiVersion = 3
+		_ = resp.Body.Close()
+		c.logger.Debugf("Detected HAProxy Data Plane API v3 at %s", c.baseURL)
+		return
+	}
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	// Fallback to v2
+	resp, err = c.doRequest("GET", "/v2/services/haproxy/storage/ssl_certificates", nil, "")
+	if err == nil && resp.StatusCode == http.StatusOK {
+		c.apiVersion = 2
+		_ = resp.Body.Close()
+		c.logger.Debugf("Detected HAProxy Data Plane API v2 at %s", c.baseURL)
+		return
+	}
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	c.apiVersion = 0
+	c.logger.Warnf("Could not detect HAProxy Data Plane API version at %s, falling back to v2", c.baseURL)
+}
+
+// APIVersion returns the detected API version
+func (c *Client) APIVersion() int {
+	return c.apiVersion
 }
 
 // NewClients creates multiple HAProxy Data Plane API clients from a list of configurations
@@ -161,8 +200,13 @@ func (c *Client) ListCertificates() ([]string, error) {
 
 // ListCertificateRefs returns a list of certificate references with both display names and file paths
 func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
+	version := "v2"
+	if c.apiVersion == 3 {
+		version = "v3"
+	}
 	// Use storage API endpoint for listing SSL certificates
-	resp, err := c.doRequest("GET", "/v2/services/haproxy/storage/ssl_certificates", nil, "")
+	path := fmt.Sprintf("/%s/services/haproxy/storage/ssl_certificates", version)
+	resp, err := c.doRequest("GET", path, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -216,8 +260,13 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 		return errors.Wrap(err, "failed to close multipart writer")
 	}
 
+	version := "v2"
+	if c.apiVersion == 3 {
+		version = "v3"
+	}
+
 	// Send PUT request to replace certificate
-	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
+	path := fmt.Sprintf("/%s/services/haproxy/runtime/certs/%s", version, certName)
 	resp, err := c.doRequest("PUT", path, &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
@@ -252,8 +301,14 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 		return errors.Wrap(err, "failed to close multipart writer")
 	}
 
+	version := "v2"
+	if c.apiVersion == 3 {
+		version = "v3"
+	}
+
 	// Send POST request to create certificate
-	resp, err := c.doRequest("POST", "/v2/services/haproxy/runtime/certs", &buf, writer.FormDataContentType())
+	path := fmt.Sprintf("/%s/services/haproxy/runtime/certs", version)
+	resp, err := c.doRequest("POST", path, &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
 	}
@@ -268,9 +323,13 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 	return nil
 }
 
-// DeleteCertificate deletes a certificate entry via Data Plane API
+// DeleteCertificate deletes a certificate entry via Data Plane API (runtime)
 func (c *Client) DeleteCertificate(certName string) error {
-	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
+	version := "v2"
+	if c.apiVersion == 3 {
+		version = "v3"
+	}
+	path := fmt.Sprintf("/%s/services/haproxy/runtime/certs/%s", version, certName)
 	resp, err := c.doRequest("DELETE", path, nil, "")
 	if err != nil {
 		return err
@@ -282,8 +341,71 @@ func (c *Client) DeleteCertificate(certName string) error {
 		return errors.Errorf("failed to delete certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
 	}
 
-	c.logger.Debugf("Deleted certificate %s", certName)
+	c.logger.Debugf("Deleted certificate %s from runtime", certName)
 	return nil
+}
+
+// DeleteStorageCertificate deletes a certificate from storage via Data Plane API v3
+func (c *Client) DeleteStorageCertificate(certName string) error {
+	if c.apiVersion < 3 {
+		return errors.New("deleting storage certificates is only supported in HAProxy Data Plane API v3")
+	}
+
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s", certName)
+	resp, err := c.doRequest("DELETE", path, nil, "")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return errors.Errorf("failed to delete storage certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+	}
+
+	c.logger.Debugf("Deleted certificate %s from storage", certName)
+	return nil
+}
+
+// GetCertificateBody returns the PEM body of a certificate from storage via Data Plane API v3
+func (c *Client) GetCertificateBody(certName string) (string, error) {
+	if c.apiVersion < 3 {
+		return "", errors.New("getting certificate bodies is only supported in HAProxy Data Plane API v3")
+	}
+
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s", certName)
+	resp, err := c.doRequest("GET", path, nil, "")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", errors.Errorf("failed to get certificate body %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+	}
+
+	// v3 storage API returns the PEM data in the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read certificate body")
+	}
+
+	// If the response is JSON, extract the PEM field.
+	// Based on Data Plane API v3 spec, it might return a JSON object with 'data' or similar,
+	// or just the raw PEM. Let's assume it's raw PEM for now or check Content-Type.
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "application/json") {
+		var res struct {
+			Data string `json:"data"`
+		}
+		if err := json.Unmarshal(body, &res); err != nil {
+			return "", errors.Wrap(err, "failed to decode certificate body JSON")
+		}
+		return res.Data, nil
+	}
+
+	return string(body), nil
 }
 
 // ExtractDomainFromPath extracts the domain name from a certificate path

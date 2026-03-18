@@ -19,7 +19,7 @@ build/
 .direnv
 
 # pre-commit
-.pre-commit-config.yaml
+# .pre-commit-config.yaml
 
 # Added by goreleaser init:
 dist/

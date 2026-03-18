@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	legoLog "github.com/go-acme/lego/v4/log"
@@ -109,13 +110,28 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		certPath := ref.DisplayName
 		logger.Infof("[%s] Checking certificate: %s", endpoint, certPath)
 
+		// Support v3 advanced features: renaming certificates with '*' in filename
+		if strings.Contains(certPath, "*") {
+			if haproxyClient.APIVersion() >= 3 {
+				newPath, err := renameCertificateWithWildcard(logger, certPath, haproxyClient)
+				if err != nil {
+					logger.Errorf("[%s] Failed to rename wildcard certificate %s: %v", endpoint, certPath, err)
+				} else {
+					certPath = newPath
+				}
+			} else if haproxyClient.APIVersion() < 2 {
+				logger.Warnf("[%s] HAProxy Data Plane API v2 support isn't available. Please rename certificate %s manually to remove '*'.", endpoint, certPath)
+			} else {
+				logger.Warnf("[%s] Certificate %s contains '*', but automatic renaming requires HAProxy Data Plane API v3. Please rename manually.", endpoint, certPath)
+			}
+		}
+
 		// Extract domain name from certificate path
 		domain := haproxy.ExtractDomainFromPath(certPath)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
 
-		// Check if certificate needs update (uses Vault as source of truth for cert details,
-		// since HAProxy Data Plane API doesn't provide certificate metadata)
-		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, cfg.Certificatee.RenewBeforeDays)
+		// Check if certificate needs update
+		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, cfg.Certificatee.RenewBeforeDays, haproxyClient, certPath, logger)
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
@@ -149,9 +165,36 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	return errors.Join(errs...)
 }
 
-func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
+func renameCertificateWithWildcard(logger *logrus.Logger, certPath string, haproxyClient *haproxy.Client) (string, error) {
+	newCertPath := strings.ReplaceAll(certPath, "*", "_wildcard_")
+	logger.Infof("Renaming wildcard certificate %s to %s", certPath, newCertPath)
+
+	// 1. Get current PEM body
+	pemData, err := haproxyClient.GetCertificateBody(certPath)
+	if err != nil {
+		return certPath, fmt.Errorf("failed to get certificate body for rename: %w", err)
+	}
+
+	// 2. Create new certificate (uploads to storage and runtime)
+	if err := haproxyClient.CreateCertificate(newCertPath, pemData); err != nil {
+		return certPath, fmt.Errorf("failed to create renamed certificate %s: %w", newCertPath, err)
+	}
+
+	// 3. Delete old certificate from storage (v3 feature)
+	if err := haproxyClient.DeleteStorageCertificate(certPath); err != nil {
+		logger.Errorf("Failed to delete old storage certificate %s after rename: %v", certPath, err)
+	}
+
+	// 4. Delete old certificate from runtime
+	if err := haproxyClient.DeleteCertificate(certPath); err != nil {
+		logger.Errorf("Failed to delete old runtime certificate %s after rename: %v", certPath, err)
+	}
+
+	return newCertPath, nil
+}
+
+func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, renewBeforeDays int, haproxyClient *haproxy.Client, certPath string, logger *logrus.Logger) (shouldUpdate bool, reason string, isExpiring bool, err error) {
 	// Get certificate from Vault - this is the source of truth for certificate details
-	// (HAProxy Data Plane API doesn't provide certificate metadata like expiry or serial)
 	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
 	if err != nil {
 		return false, "", false, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
@@ -165,9 +208,36 @@ func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, rene
 	threshold := time.Now().AddDate(0, 0, renewBeforeDays)
 	isExpiring = vaultCert.NotAfter.Before(threshold)
 
+	// In v3, we can get the full certificate body from HAProxy to check its expiry and serial
+	if haproxyClient.APIVersion() >= 3 {
+		haproxyPem, err := haproxyClient.GetCertificateBody(certPath)
+		if err == nil {
+			// Parse HAProxy certificate
+			haproxyCert, parseErr := certificate.ParsePEMCertificate(haproxyPem)
+			if parseErr == nil {
+				// 1. Check if HAProxy cert is expiring
+				if haproxyCert.NotAfter.Before(threshold) {
+					return true, fmt.Sprintf("HAProxy certificate expires on %s (within %d days)", haproxyCert.NotAfter.Format(time.RFC3339), renewBeforeDays), true, nil
+				}
+
+				// 2. Check if HAProxy cert differs from Vault cert (by serial number)
+				if haproxy.NormalizeSerial(haproxyCert.SerialNumber.String()) != haproxy.NormalizeSerial(vaultCert.SerialNumber.String()) {
+					return true, fmt.Sprintf("HAProxy certificate serial %s differs from Vault certificate serial %s",
+						haproxyCert.SerialNumber.String(), vaultCert.SerialNumber.String()), false, nil
+				}
+
+				// HAProxy cert is up to date and valid
+				return false, "", false, nil
+			}
+			logger.Warnf("Failed to parse HAProxy certificate %s: %v", certPath, parseErr)
+		} else {
+			logger.Warnf("Failed to get HAProxy certificate body for %s: %v", certPath, err)
+		}
+	}
+
 	if isExpiring {
-		// Certificate is expiring, sync to HAProxy (likely was recently renewed)
-		return true, fmt.Sprintf("certificate expires on %s (within %d days)", vaultCert.NotAfter.Format(time.RFC3339), renewBeforeDays), true, nil
+		// Certificate is expiring in Vault, sync to HAProxy
+		return true, fmt.Sprintf("Vault certificate expires on %s (within %d days)", vaultCert.NotAfter.Format(time.RFC3339), renewBeforeDays), true, nil
 	}
 
 	return false, "", false, nil
