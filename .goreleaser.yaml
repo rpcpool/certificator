@@ -28,9 +28,10 @@ builds:
 
 archives:
   - formats: [tar.gz]
-    # this name template makes the OS and Arch compatible with the results of `uname`.
+    # Use .Binary so each build produces a distinct archive name:
+    # certificator_Linux_x86_64.tar.gz and certificatee_Linux_x86_64.tar.gz
     name_template: >-
-      {{ .ProjectName }}_
+      {{ .Binary }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
@@ -43,21 +44,3 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
-
-kos:
-  - id: certificator
-    build: certificator
-    base_import_paths: true
-    base_image: gcr.io/distroless/static-debian13:latest
-    tags:
-      - latest
-      - "{{.Tag}}"
-      - "{{if not .Prerelease}}stable{{end}}"
-  - id: certificatee
-    build: certificatee
-    base_import_paths: true
-    base_image: gcr.io/distroless/static-debian13:latest
-    tags:
-      - latest
-      - "{{.Tag}}"
-      - "{{if not .Prerelease}}stable{{end}}"
