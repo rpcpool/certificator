@@ -3,11 +3,14 @@ package haproxy
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -303,6 +306,62 @@ func ExtractDomainFromPath(certPath string) string {
 	}
 
 	return filename
+}
+
+// GetServedCertificate connects to the HAProxy HTTPS frontend on port 443 and returns
+// the leaf certificate served for the given domain via TLS SNI. This lets us detect
+// serial mismatches without relying on the Data Plane API storage endpoint.
+func (c *Client) GetServedCertificate(domain string) (*x509.Certificate, error) {
+	host, err := c.httpsHost()
+	if err != nil {
+		return nil, err
+	}
+
+	// HAProxy serves wildcard certs by SNI - need a concrete subdomain, not "*.foo" or "_.foo"
+	serverName := domain
+	if strings.HasPrefix(domain, "*.") || strings.HasPrefix(domain, "_.") {
+		serverName = "cert." + domain[2:]
+	}
+
+	conn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: c.timeout},
+		"tcp",
+		net.JoinHostPort(host, "443"),
+		&tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true, //nolint:gosec // Intentional: we're reading the cert, not validating the chain
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("TLS dial to %s:443: %w", host, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("no certificates in TLS handshake from %s", host)
+	}
+	return certs[0], nil
+}
+
+// httpsHost extracts the hostname from the DPAPI base URL.
+// Since DPAPI runs on the same node as HAProxy, this is the HTTPS frontend host.
+func (c *Client) httpsHost() (string, error) {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse base URL %s: %w", c.baseURL, err)
+	}
+	return u.Hostname(), nil
+}
+
+// NormalizeDomainForVault converts a sanitized cert filename domain back to the
+// Vault lookup key. HAProxy stores wildcard certs as "_.domain" on disk, but
+// certificator stores them in Vault as "*.domain".
+func NormalizeDomainForVault(domain string) string {
+	if strings.HasPrefix(domain, "_.") {
+		return "*." + domain[2:]
+	}
+	return domain
 }
 
 // IsExpiring checks if a certificate is expiring within the given number of days

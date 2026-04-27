@@ -50,6 +50,10 @@ var (
 		Name: "certificatee_certificates_total",
 		Help: "Total number of certificates managed per endpoint",
 	}, []string{"endpoint"})
+	CertificatesWildcard = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_certificates_wildcard_total",
+		Help: "Number of certificates with wildcard (*) in their storage filename, indicating pre-migration format",
+	}, []string{"endpoint"})
 
 	// HAProxy endpoint health
 	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{

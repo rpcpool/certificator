@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	legoLog "github.com/go-acme/lego/v4/log"
@@ -100,7 +101,15 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	certmetrics.LastSyncTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
 	certmetrics.CertificatesTotal.WithLabelValues(endpoint).Set(float64(len(certRefs)))
 
-	logger.Infof("[%s] %d certificates found", endpoint, len(certRefs))
+	var wildcardCount int
+	for _, ref := range certRefs {
+		if strings.Contains(ref.DisplayName, "*") || strings.Contains(ref.FilePath, "*") {
+			wildcardCount++
+		}
+	}
+	certmetrics.CertificatesWildcard.WithLabelValues(endpoint).Set(float64(wildcardCount))
+
+	logger.Infof("[%s] %d certificates found (%d with wildcard names)", endpoint, len(certRefs), wildcardCount)
 
 	var errs []error
 	var expiringCount int
@@ -109,8 +118,9 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		certPath := ref.DisplayName
 		logger.Infof("[%s] Checking certificate: %s", endpoint, certPath)
 
-		// Extract domain name from certificate path
-		domain := haproxy.ExtractDomainFromPath(certPath)
+		// Extract domain name from certificate path and normalize _.domain → *.domain for Vault
+		rawDomain := haproxy.ExtractDomainFromPath(certPath)
+		domain := haproxy.NormalizeDomainForVault(rawDomain)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
 
 		// Check if certificate needs update (uses Vault as source of truth for cert details,
@@ -120,6 +130,16 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
 			continue
+		}
+
+		// Serial mismatch check: if Vault cert is not expiring but HAProxy is serving an older
+		// cert (e.g. cert was renewed but push failed, or HAProxy has expired cert post-renewal),
+		// detect it by comparing serial numbers via a live TLS dial.
+		if !shouldUpdate {
+			if serialUpdate, serialReason := checkSerialMismatch(domain, vaultClient, haproxyClient, logger); serialUpdate {
+				shouldUpdate = true
+				reason = serialReason
+			}
 		}
 
 		// Track expiring certificates
@@ -218,6 +238,30 @@ func buildPEMBundle(secrets map[string]any) (string, error) {
 	}
 
 	return pemData, nil
+}
+
+// checkSerialMismatch detects when HAProxy is serving a different cert than what's in Vault.
+// This catches cases where Vault has a freshly renewed cert but HAProxy still serves the old one.
+func checkSerialMismatch(domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client, logger *logrus.Logger) (bool, string) {
+	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
+	if err != nil || vaultCert == nil {
+		logger.Debugf("Serial check skipped for %s: could not get Vault cert: %v", domain, err)
+		return false, ""
+	}
+
+	servedCert, err := haproxyClient.GetServedCertificate(domain)
+	if err != nil {
+		logger.Debugf("Serial check skipped for %s: could not get served cert: %v", domain, err)
+		return false, ""
+	}
+
+	vaultSerial := haproxy.NormalizeSerial(vaultCert.SerialNumber.Text(16))
+	servedSerial := haproxy.NormalizeSerial(servedCert.SerialNumber.Text(16))
+
+	if vaultSerial != servedSerial {
+		return true, fmt.Sprintf("serial mismatch: vault=%s haproxy=%s", vaultSerial, servedSerial)
+	}
+	return false, ""
 }
 
 // endsWith checks if a string ends with a suffix
