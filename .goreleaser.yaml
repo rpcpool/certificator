@@ -27,9 +27,7 @@ builds:
       - amd64
 
 archives:
-  - formats: [tar.gz]
-    # Use .Binary so each build produces a distinct archive name:
-    # certificator_Linux_x86_64.tar.gz and certificatee_Linux_x86_64.tar.gz
+  - formats: [binary]
     name_template: >-
       {{ .Binary }}_
       {{- title .Os }}_
