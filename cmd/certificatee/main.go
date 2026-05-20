@@ -44,8 +44,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	healthState := &syncHealthState{}
-	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient, haproxyClients, healthState, cfg.Certificatee.UpdateInterval))
+	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient))
 	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
 	logger.Infof("Configured %d HAProxy endpoint(s)", len(haproxyClients))
@@ -61,19 +60,13 @@ func main() {
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
-		healthState.Mark(err)
 		logger.Error(err)
-	} else {
-		healthState.Mark(nil)
 	}
 
 	for range ticker.C {
 		if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
-			healthState.Mark(err)
 			logger.Error(err)
-			continue
 		}
-		healthState.Mark(nil)
 	}
 }
 
@@ -99,12 +92,18 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	// Get list of certificates from HAProxy with file paths for lookups
 	certRefs, err := haproxyClient.ListCertificateRefs()
 	if err != nil {
-		certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(0)
+		if haproxy.IsV3UnavailableError(err) {
+			setEndpointState(endpoint, 1, 0, 0)
+			logger.Infof("[%s] HAProxy Data Plane API v3 certificate storage endpoint not available yet, waiting for upgrade", endpoint)
+			return nil
+		}
+
+		setEndpointState(endpoint, 0, 0, 0)
 		return fmt.Errorf("failed to list certificates: %w", err)
 	}
 
 	// Mark endpoint as up and record sync timestamp
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(1)
+	setEndpointState(endpoint, 1, 1, 0)
 	certmetrics.LastSyncTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
 	certmetrics.CertificatesTotal.WithLabelValues(endpoint).Set(float64(len(certRefs)))
 
@@ -144,7 +143,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 			}
 		}
 
-		if !haproxyCert.NotAfter.IsZero() {
+		if haproxyCert != nil && !haproxyCert.NotAfter.IsZero() {
 			certmetrics.CertificateNotAfterTimestamp.WithLabelValues(endpoint, domain).Set(float64(haproxyCert.NotAfter.Unix()))
 		}
 
@@ -180,8 +179,19 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 	// Record expiring certificates count
 	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
+	if len(errs) == 0 {
+		setEndpointState(endpoint, 1, 1, 1)
+	} else {
+		setEndpointState(endpoint, 1, 1, 0)
+	}
 
 	return errors.Join(errs...)
+}
+
+func setEndpointState(endpoint string, reachable, v3Ready, working float64) {
+	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "reachable").Set(reachable)
+	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "v3_ready").Set(v3Ready)
+	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "working").Set(working)
 }
 
 func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {

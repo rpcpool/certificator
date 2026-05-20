@@ -69,8 +69,8 @@ var (
 	// HAProxy endpoint health
 	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_haproxy_endpoint_up",
-		Help: "Indicates if HAProxy endpoint is reachable (1 = up, 0 = down)",
-	}, []string{"endpoint"})
+		Help: "Indicates HAProxy endpoint state for certificatee (1 = true, 0 = false)",
+	}, []string{"endpoint", "state"})
 	LastSyncTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_last_sync_timestamp_seconds",
 		Help: "Unix timestamp of the last successful sync",
