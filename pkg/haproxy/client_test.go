@@ -322,7 +322,7 @@ func newMockDataPlaneAPI(t *testing.T) *mockDataPlaneAPI {
 			return
 		}
 
-		// Try prefix matching for dynamic paths (e.g., /v2/services/haproxy/runtime/certs/example.com.pem)
+		// Try prefix matching for dynamic paths (e.g., /v3/services/haproxy/storage/ssl_certificates/example.com.pem)
 		for pattern, handler := range m.handlers {
 			if strings.HasPrefix(key, pattern) {
 				handler(w, r)
@@ -416,7 +416,7 @@ func TestListCertificates(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tt.statusCode)
 				if tt.response != nil {
@@ -496,29 +496,27 @@ func TestUpdateCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("PUT", "/v2/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
-				// Verify content type is multipart
+			mock.SetHandler("GET", "/v3/services/haproxy/configuration/version", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("42"))
+			})
+
+			mock.SetHandler("PUT", "/v3/services/haproxy/storage/ssl_certificates/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("version") != "42" {
+					t.Errorf("version query = %q, want %q", r.URL.Query().Get("version"), "42")
+				}
+
+				// Verify content type is plain text
 				contentType := r.Header.Get("Content-Type")
-				if !strings.Contains(contentType, "multipart/form-data") {
-					t.Errorf("Expected multipart/form-data content type, got %s", contentType)
+				if !strings.Contains(contentType, "text/plain") {
+					t.Errorf("Expected text/plain content type, got %s", contentType)
 				}
 
-				// Read the multipart form
-				err := r.ParseMultipartForm(10 << 20) // 10 MB
+				data, err := io.ReadAll(r.Body)
 				if err != nil {
-					t.Errorf("Failed to parse multipart form: %v", err)
+					t.Errorf("Failed to read request body: %v", err)
 				}
-
-				// Verify file was uploaded
-				file, _, err := r.FormFile("file_upload")
-				if err != nil {
-					t.Errorf("Failed to get file from form: %v", err)
-				} else {
-					defer func() { _ = file.Close() }()
-					data, _ := io.ReadAll(file)
-					if string(data) != tt.pemData {
-						t.Errorf("File data = %q, want %q", string(data), tt.pemData)
-					}
+				if string(data) != tt.pemData {
+					t.Errorf("File data = %q, want %q", string(data), tt.pemData)
 				}
 
 				w.WriteHeader(tt.statusCode)
@@ -534,6 +532,51 @@ func TestUpdateCertificate(t *testing.T) {
 				t.Errorf("UpdateCertificate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestGetCertificateDetail(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+
+	mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates/example.com.pem", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"file":         "/etc/haproxy/ssl/example.com.pem",
+			"storage_name": "example.com.pem",
+			"description":  "managed SSL file",
+			"domains":      "example.com",
+			"issuers":      "Example CA",
+			"not_after":    "2026-09-13T09:00:00.000Z",
+			"not_before":   "2025-09-13T09:00:00.000Z",
+			"serial":       "1f:52:02:e0",
+		})
+	})
+
+	client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	detail, err := client.GetCertificateDetail("example.com.pem")
+	if err != nil {
+		t.Fatalf("GetCertificateDetail() error = %v", err)
+	}
+
+	if detail.StorageName != "example.com.pem" {
+		t.Errorf("StorageName = %q, want %q", detail.StorageName, "example.com.pem")
+	}
+	if detail.Domains != "example.com" {
+		t.Errorf("Domains = %q, want %q", detail.Domains, "example.com")
+	}
+	if detail.Serial != "1f:52:02:e0" {
+		t.Errorf("Serial = %q, want %q", detail.Serial, "1f:52:02:e0")
+	}
+	if detail.NotAfter.IsZero() {
+		t.Error("NotAfter should be parsed")
 	}
 }
 
@@ -583,7 +626,15 @@ func TestCreateCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("POST", "/v2/services/haproxy/runtime/certs", func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("GET", "/v3/services/haproxy/configuration/version", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("42"))
+			})
+
+			mock.SetHandler("POST", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("version") != "42" {
+					t.Errorf("version query = %q, want %q", r.URL.Query().Get("version"), "42")
+				}
+
 				// Verify content type is multipart
 				contentType := r.Header.Get("Content-Type")
 				if !strings.Contains(contentType, "multipart/form-data") {
@@ -668,7 +719,14 @@ func TestDeleteCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("DELETE", "/v2/services/haproxy/runtime/certs/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+			mock.SetHandler("GET", "/v3/services/haproxy/configuration/version", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("42"))
+			})
+
+			mock.SetHandler("DELETE", "/v3/services/haproxy/storage/ssl_certificates/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("version") != "42" {
+					t.Errorf("version query = %q, want %q", r.URL.Query().Get("version"), "42")
+				}
 				w.WriteHeader(tt.statusCode)
 			})
 
@@ -693,7 +751,7 @@ func TestBasicAuth(t *testing.T) {
 	defer mock.Close()
 	mock.SetAuth("admin", "secret")
 
-	mock.SetHandler("GET", "/v2/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+	mock.SetHandler("GET", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode([]SSLCertificateEntry{})

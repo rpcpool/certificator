@@ -3,15 +3,12 @@ package haproxy
 import (
 	"bytes"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -133,11 +130,73 @@ func (c *Client) doRequest(method, path string, body io.Reader, contentType stri
 	return c.httpClient.Do(req)
 }
 
+func parseAPITime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err == nil {
+		return parsed, nil
+	}
+
+	return time.Parse(time.RFC3339, value)
+}
+
+func (c *Client) getConfigVersion() (string, error) {
+	resp, err := c.doRequest("GET", "/v3/services/haproxy/configuration/version", nil, "")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", errors.Errorf("failed to get configuration version: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read configuration version")
+	}
+
+	version := strings.TrimSpace(string(body))
+	if version == "" {
+		return "", errors.New("empty configuration version response")
+	}
+
+	return version, nil
+}
+
 // SSLCertificateEntry represents an SSL certificate entry from storage API
 type SSLCertificateEntry struct {
 	File        string `json:"file"`
 	StorageName string `json:"storage_name"`
 	Description string `json:"description"`
+}
+
+type sslCertificateDetailResponse struct {
+	File        string `json:"file"`
+	StorageName string `json:"storage_name"`
+	Description string `json:"description"`
+	Domains     string `json:"domains"`
+	Issuers     string `json:"issuers"`
+	NotAfter    string `json:"not_after"`
+	NotBefore   string `json:"not_before"`
+	Serial      string `json:"serial"`
+}
+
+// CertificateDetail describes the current HAProxy certificate state reported by
+// the Data Plane API.
+type CertificateDetail struct {
+	File        string
+	StorageName string
+	Description string
+	Domains     string
+	Issuers     string
+	NotAfter    time.Time
+	NotBefore   time.Time
+	Serial      string
 }
 
 // CertificateRef holds both display name and file path for a certificate
@@ -165,7 +224,7 @@ func (c *Client) ListCertificates() ([]string, error) {
 // ListCertificateRefs returns a list of certificate references with both display names and file paths
 func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 	// Use storage API endpoint for listing SSL certificates
-	resp, err := c.doRequest("GET", "/v2/services/haproxy/storage/ssl_certificates", nil, "")
+	resp, err := c.doRequest("GET", "/v3/services/haproxy/storage/ssl_certificates", nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -200,28 +259,58 @@ func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 	return refs, nil
 }
 
+// GetCertificateDetail returns Data Plane API metadata for a specific
+// certificate file.
+func (c *Client) GetCertificateDetail(certName string) (*CertificateDetail, error) {
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s", url.PathEscape(certName))
+	resp, err := c.doRequest("GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, errors.Errorf("failed to get certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+	}
+
+	var raw sslCertificateDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, errors.Wrap(err, "failed to decode certificate detail")
+	}
+
+	notAfter, err := parseAPITime(raw.NotAfter)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse not_after for certificate %s", certName)
+	}
+
+	notBefore, err := parseAPITime(raw.NotBefore)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse not_before for certificate %s", certName)
+	}
+
+	return &CertificateDetail{
+		File:        raw.File,
+		StorageName: raw.StorageName,
+		Description: raw.Description,
+		Domains:     raw.Domains,
+		Issuers:     raw.Issuers,
+		NotAfter:    notAfter,
+		NotBefore:   notBefore,
+		Serial:      raw.Serial,
+	}, nil
+}
+
 // UpdateCertificate uploads and commits a certificate update via Data Plane API
 func (c *Client) UpdateCertificate(certName, pemData string) error {
-	// Create multipart form data
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	// Add file part
-	part, err := writer.CreateFormFile("file_upload", certName)
+	version, err := c.getConfigVersion()
 	if err != nil {
-		return errors.Wrap(err, "failed to create form file")
-	}
-	if _, err := part.Write([]byte(pemData)); err != nil {
-		return errors.Wrap(err, "failed to write certificate data")
-	}
-
-	if err := writer.Close(); err != nil {
-		return errors.Wrap(err, "failed to close multipart writer")
+		return err
 	}
 
 	// Send PUT request to replace certificate
-	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
-	resp, err := c.doRequest("PUT", path, &buf, writer.FormDataContentType())
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?version=%s", url.PathEscape(certName), url.QueryEscape(version))
+	resp, err := c.doRequest("PUT", path, strings.NewReader(pemData), "text/plain")
 	if err != nil {
 		return err
 	}
@@ -238,6 +327,11 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 
 // CreateCertificate creates a new certificate entry via Data Plane API
 func (c *Client) CreateCertificate(certName, pemData string) error {
+	version, err := c.getConfigVersion()
+	if err != nil {
+		return err
+	}
+
 	// Create multipart form data
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -256,7 +350,8 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 	}
 
 	// Send POST request to create certificate
-	resp, err := c.doRequest("POST", "/v2/services/haproxy/runtime/certs", &buf, writer.FormDataContentType())
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates?version=%s", url.QueryEscape(version))
+	resp, err := c.doRequest("POST", path, &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
 	}
@@ -273,7 +368,12 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 
 // DeleteCertificate deletes a certificate entry via Data Plane API
 func (c *Client) DeleteCertificate(certName string) error {
-	path := fmt.Sprintf("/v2/services/haproxy/runtime/certs/%s", certName)
+	version, err := c.getConfigVersion()
+	if err != nil {
+		return err
+	}
+
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?version=%s", url.PathEscape(certName), url.QueryEscape(version))
 	resp, err := c.doRequest("DELETE", path, nil, "")
 	if err != nil {
 		return err
@@ -308,52 +408,6 @@ func ExtractDomainFromPath(certPath string) string {
 	return filename
 }
 
-// GetServedCertificate connects to the HAProxy HTTPS frontend on port 443 and returns
-// the leaf certificate served for the given domain via TLS SNI. This lets us detect
-// serial mismatches without relying on the Data Plane API storage endpoint.
-func (c *Client) GetServedCertificate(domain string) (*x509.Certificate, error) {
-	host, err := c.httpsHost()
-	if err != nil {
-		return nil, err
-	}
-
-	// HAProxy serves wildcard certs by SNI - need a concrete subdomain, not "*.foo" or "_.foo"
-	serverName := domain
-	if strings.HasPrefix(domain, "*.") || strings.HasPrefix(domain, "_.") {
-		serverName = "cert." + domain[2:]
-	}
-
-	conn, err := tls.DialWithDialer(
-		&net.Dialer{Timeout: c.timeout},
-		"tcp",
-		net.JoinHostPort(host, "443"),
-		&tls.Config{
-			ServerName:         serverName,
-			InsecureSkipVerify: true, //nolint:gosec // Intentional: we're reading the cert, not validating the chain
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("TLS dial to %s:443: %w", host, err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	certs := conn.ConnectionState().PeerCertificates
-	if len(certs) == 0 {
-		return nil, fmt.Errorf("no certificates in TLS handshake from %s", host)
-	}
-	return certs[0], nil
-}
-
-// httpsHost extracts the hostname from the DPAPI base URL.
-// Since DPAPI runs on the same node as HAProxy, this is the HTTPS frontend host.
-func (c *Client) httpsHost() (string, error) {
-	u, err := url.Parse(c.baseURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse base URL %s: %w", c.baseURL, err)
-	}
-	return u.Hostname(), nil
-}
-
 // NormalizeDomainForVault converts a sanitized cert filename domain back to the
 // Vault lookup key. HAProxy stores wildcard certs as "_.domain" on disk, but
 // certificator stores them in Vault as "*.domain".
@@ -374,11 +428,24 @@ func IsExpiring(certInfo *CertInfo, renewBeforeDays int) bool {
 	return certInfo.NotAfter.Before(threshold)
 }
 
-// NormalizeSerial normalizes a certificate serial number for comparison
-// Removes colons, spaces, and converts to uppercase
+// NormalizeSerial normalizes a certificate serial number for comparison.
+// Removes non-hex characters and converts to uppercase.
 func NormalizeSerial(serial string) string {
-	re := regexp.MustCompile(`[^a-fA-F0-9]`)
-	return strings.ToUpper(re.ReplaceAllString(serial, ""))
+	var b strings.Builder
+	b.Grow(len(serial))
+
+	for _, ch := range serial {
+		switch {
+		case ch >= '0' && ch <= '9':
+			b.WriteRune(ch)
+		case ch >= 'a' && ch <= 'f':
+			b.WriteRune(ch - ('a' - 'A'))
+		case ch >= 'A' && ch <= 'F':
+			b.WriteRune(ch)
+		}
+	}
+
+	return b.String()
 }
 
 // logrusLeveledLogger wraps a logrus.Logger to implement retryablehttp.LeveledLogger
