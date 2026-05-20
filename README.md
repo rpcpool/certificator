@@ -86,6 +86,9 @@ Certificate files must be named after the domain (e.g., `/etc/haproxy/certs/exam
 
 Certificatee exposes Prometheus metrics for monitoring:
 
+- `GET /metrics` exposes Prometheus metrics.
+- `GET /health` returns `200 OK` only when the process can still reach Vault, can query its configured HAProxy Data Plane API endpoints, and `certificatee` has completed a recent successful sync.
+
 ### General Metrics
 
 | Metric | Type | Labels | Description |

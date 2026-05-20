@@ -33,9 +33,6 @@ func main() {
 		logger.Fatal("HAPROXY_DATAPLANE_API_URLS must be set (comma-separated list of Data Plane API URLs)")
 	}
 
-	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
-	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
-
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
 		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)
 	if err != nil {
@@ -46,6 +43,10 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
+
+	healthState := &syncHealthState{}
+	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient, haproxyClients, healthState, cfg.Certificatee.UpdateInterval))
+	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
 	logger.Infof("Configured %d HAProxy endpoint(s)", len(haproxyClients))
 	for _, client := range haproxyClients {
@@ -60,13 +61,19 @@ func main() {
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
+		healthState.Mark(err)
 		logger.Error(err)
+	} else {
+		healthState.Mark(nil)
 	}
 
 	for range ticker.C {
 		if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
+			healthState.Mark(err)
 			logger.Error(err)
+			continue
 		}
+		healthState.Mark(nil)
 	}
 }
 

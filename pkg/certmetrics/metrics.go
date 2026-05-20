@@ -2,6 +2,7 @@ package certmetrics
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/sirupsen/logrus"
 )
+
+type HealthChecker func(context.Context) error
 
 var (
 	// Shared metrics
@@ -70,15 +73,20 @@ var (
 	}, []string{"endpoint"})
 )
 
-func StartMetricsServer(logger *logrus.Logger, address string) {
+func StartMetricsServer(logger *logrus.Logger, address string, healthCheckers ...HealthChecker) {
 	if address == "" {
 		logger.Debug("metrics listen address is empty, skipping metrics server start")
 		return
 	}
 
+	var healthChecker HealthChecker
+	if len(healthCheckers) > 0 {
+		healthChecker = healthCheckers[0]
+	}
+
 	metricsServer := &http.Server{
 		Addr:              address,
-		Handler:           promhttp.Handler(),
+		Handler:           newHandler(healthChecker),
 		ReadHeaderTimeout: 100 * time.Millisecond,
 	}
 
@@ -88,6 +96,30 @@ func StartMetricsServer(logger *logrus.Logger, address string) {
 			logger.Errorf("metrics server error: %v", err)
 		}
 	}()
+}
+
+func newHandler(healthChecker HealthChecker) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if healthChecker == nil {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		if err := healthChecker(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	return mux
 }
 
 func PushMetrics(logger *logrus.Logger, pushUrl string) {

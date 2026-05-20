@@ -23,6 +23,18 @@ func NewVaultClient(roleID, secretID, env, kvPrefix string, logger *logrus.Logge
 	return &VaultClient{client: client, kvPrefix: kvPrefix, logger: logger}, nil
 }
 
+// TokenLookupSelf verifies that the current Vault token is valid.
+func (cl *VaultClient) TokenLookupSelf() error {
+	resp, err := cl.client.Auth().Token().LookupSelf()
+	if err != nil {
+		return fmt.Errorf("failed looking up Vault token: %w", err)
+	}
+	if resp == nil {
+		return fmt.Errorf("vault token lookup returned nil response")
+	}
+	return nil
+}
+
 // KVWrite writes value to vault key value v2 storage
 func (cl *VaultClient) KVWrite(path string, value map[string]string) error {
 	fullPath := vaultFullPath(path, cl.kvPrefix)
