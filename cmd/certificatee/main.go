@@ -132,9 +132,16 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 		haproxyCert, err := haproxyClient.GetCertificateDetail(certPath)
 		if err != nil {
-			errs = append(errs, err)
-			logger.Errorf("[%s] failed to get dataplane metadata for %s: %v", endpoint, certPath, err)
-			continue
+			certmetrics.CertificateMetadataLookupFailures.WithLabelValues(endpoint, domain).Inc()
+
+			if strings.Contains(err.Error(), "status 404") {
+				logger.Warnf("[%s] missing dataplane metadata for %s, falling back to vault expiry only: %v", endpoint, certPath, err)
+				haproxyCert = nil
+			} else {
+				errs = append(errs, err)
+				logger.Errorf("[%s] failed to get dataplane metadata for %s: %v", endpoint, certPath, err)
+				continue
+			}
 		}
 
 		if !haproxyCert.NotAfter.IsZero() {
@@ -188,7 +195,12 @@ func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, hapr
 	}
 
 	if haproxyCert == nil {
-		return true, "certificate metadata missing in haproxy", true, nil
+		threshold := time.Now().AddDate(0, 0, renewBeforeDays)
+		isExpiring = vaultCert.NotAfter.Before(threshold)
+		if isExpiring {
+			return true, fmt.Sprintf("vault certificate expires on %s (haproxy metadata unavailable)", vaultCert.NotAfter.Format(time.RFC3339)), true, nil
+		}
+		return false, "", false, nil
 	}
 
 	if haproxyCert.NotAfter.IsZero() {
