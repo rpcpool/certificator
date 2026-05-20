@@ -259,6 +259,13 @@ func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 	return refs, nil
 }
 
+func IsV3UnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "path /v3/services/haproxy/storage/ssl_certificates was not found")
+}
+
 // GetCertificateDetail returns Data Plane API metadata for a specific
 // certificate file.
 func (c *Client) GetCertificateDetail(certName string) (*CertificateDetail, error) {
