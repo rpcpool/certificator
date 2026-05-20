@@ -54,6 +54,10 @@ var (
 		Name: "certificatee_certificates_wildcard_total",
 		Help: "Number of certificates with wildcard (*) in their storage filename, indicating pre-migration format",
 	}, []string{"endpoint"})
+	CertificateNotAfterTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_certificate_not_after_timestamp_seconds",
+		Help: "Unix timestamp of the certificate not_after value reported by the HAProxy Data Plane API",
+	}, []string{"endpoint", "domain"})
 
 	// HAProxy endpoint health
 	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{

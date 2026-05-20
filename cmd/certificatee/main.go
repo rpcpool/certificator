@@ -123,23 +123,24 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		domain := haproxy.NormalizeDomainForVault(rawDomain)
 		logger.Debugf("[%s] Extracted domain '%s' from path '%s'", endpoint, domain, certPath)
 
-		// Check if certificate needs update (uses Vault as source of truth for cert details,
-		// since HAProxy Data Plane API doesn't provide certificate metadata)
-		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, cfg.Certificatee.RenewBeforeDays)
+		haproxyCert, err := haproxyClient.GetCertificateDetail(certPath)
+		if err != nil {
+			errs = append(errs, err)
+			logger.Errorf("[%s] failed to get dataplane metadata for %s: %v", endpoint, certPath, err)
+			continue
+		}
+
+		if !haproxyCert.NotAfter.IsZero() {
+			certmetrics.CertificateNotAfterTimestamp.WithLabelValues(endpoint, domain).Set(float64(haproxyCert.NotAfter.Unix()))
+		}
+
+		// Use Vault as the source of truth and HAProxy Data Plane API v3 metadata as
+		// the source of the currently loaded certificate state.
+		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, haproxyCert, cfg.Certificatee.RenewBeforeDays)
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
 			continue
-		}
-
-		// Serial mismatch check: if Vault cert is not expiring but HAProxy is serving an older
-		// cert (e.g. cert was renewed but push failed, or HAProxy has expired cert post-renewal),
-		// detect it by comparing serial numbers via a live TLS dial.
-		if !shouldUpdate {
-			if serialUpdate, serialReason := checkSerialMismatch(domain, vaultClient, haproxyClient, logger); serialUpdate {
-				shouldUpdate = true
-				reason = serialReason
-			}
 		}
 
 		// Track expiring certificates
@@ -169,9 +170,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	return errors.Join(errs...)
 }
 
-func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
-	// Get certificate from Vault - this is the source of truth for certificate details
-	// (HAProxy Data Plane API doesn't provide certificate metadata like expiry or serial)
+func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
 	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
 	if err != nil {
 		return false, "", false, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
@@ -181,13 +180,29 @@ func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, rene
 		return false, "", false, fmt.Errorf("certificate for %s does not exist in vault", domain)
 	}
 
-	// Check if Vault certificate is expiring
+	if haproxyCert == nil {
+		return true, "certificate metadata missing in haproxy", true, nil
+	}
+
+	if haproxyCert.NotAfter.IsZero() {
+		return false, "", false, fmt.Errorf("certificate %s is missing not_after in haproxy metadata", domain)
+	}
+
 	threshold := time.Now().AddDate(0, 0, renewBeforeDays)
-	isExpiring = vaultCert.NotAfter.Before(threshold)
+	isExpiring = haproxyCert.NotAfter.Before(threshold)
 
 	if isExpiring {
-		// Certificate is expiring, sync to HAProxy (likely was recently renewed)
-		return true, fmt.Sprintf("certificate expires on %s (within %d days)", vaultCert.NotAfter.Format(time.RFC3339), renewBeforeDays), true, nil
+		return true, fmt.Sprintf("haproxy certificate expires on %s (within %d days)", haproxyCert.NotAfter.Format(time.RFC3339), renewBeforeDays), true, nil
+	}
+
+	vaultSerial := haproxy.NormalizeSerial(vaultCert.SerialNumber.Text(16))
+	haproxySerial := haproxy.NormalizeSerial(haproxyCert.Serial)
+	if haproxySerial != "" && vaultSerial != haproxySerial {
+		return true, fmt.Sprintf("serial mismatch: vault=%s haproxy=%s", vaultSerial, haproxySerial), false, nil
+	}
+
+	if vaultCert.NotAfter.After(haproxyCert.NotAfter) {
+		return true, fmt.Sprintf("vault certificate is newer: vault=%s haproxy=%s", vaultCert.NotAfter.Format(time.RFC3339), haproxyCert.NotAfter.Format(time.RFC3339)), false, nil
 	}
 
 	return false, "", false, nil
@@ -238,30 +253,6 @@ func buildPEMBundle(secrets map[string]any) (string, error) {
 	}
 
 	return pemData, nil
-}
-
-// checkSerialMismatch detects when HAProxy is serving a different cert than what's in Vault.
-// This catches cases where Vault has a freshly renewed cert but HAProxy still serves the old one.
-func checkSerialMismatch(domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client, logger *logrus.Logger) (bool, string) {
-	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
-	if err != nil || vaultCert == nil {
-		logger.Debugf("Serial check skipped for %s: could not get Vault cert: %v", domain, err)
-		return false, ""
-	}
-
-	servedCert, err := haproxyClient.GetServedCertificate(domain)
-	if err != nil {
-		logger.Debugf("Serial check skipped for %s: could not get served cert: %v", domain, err)
-		return false, ""
-	}
-
-	vaultSerial := haproxy.NormalizeSerial(vaultCert.SerialNumber.Text(16))
-	servedSerial := haproxy.NormalizeSerial(servedCert.SerialNumber.Text(16))
-
-	if vaultSerial != servedSerial {
-		return true, fmt.Sprintf("serial mismatch: vault=%s haproxy=%s", vaultSerial, servedSerial)
-	}
-	return false, ""
 }
 
 // endsWith checks if a string ends with a suffix
