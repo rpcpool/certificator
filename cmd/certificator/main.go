@@ -26,14 +26,19 @@ func main() {
 	logger := cfg.Log.Logger
 	legoLog.Logger = logger
 
-	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress)
-	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
-
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
 		cfg.Vault.ApproleSecretID, cfg.Environment, cfg.Vault.KVStoragePath, logger)
 	if err != nil {
 		logger.Fatal(err)
 	}
+
+	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return vaultClient.TokenLookupSelf()
+	})
+	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
 	acmeClient, err := acme.NewClient(cfg.Acme.AccountEmail, cfg.Acme.ServerURL, cfg.Acme.EABKid, cfg.Acme.EABHmacKey,
 		cfg.Acme.ReregisterAccount, vaultClient, logger)
