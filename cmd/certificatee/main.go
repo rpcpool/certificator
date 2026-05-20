@@ -44,7 +44,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient, haproxyClients))
+	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient))
 	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
 	logger.Infof("Configured %d HAProxy endpoint(s)", len(haproxyClients))
