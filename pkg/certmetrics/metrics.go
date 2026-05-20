@@ -61,11 +61,23 @@ var (
 		Name: "certificatee_certificate_not_after_timestamp_seconds",
 		Help: "Unix timestamp of the certificate not_after value reported by the HAProxy Data Plane API",
 	}, []string{"endpoint", "domain"})
+	CertificateMetadataLookupFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_certificate_metadata_lookup_failures_total",
+		Help: "Total number of HAProxy Data Plane API per-certificate metadata lookup failures",
+	}, []string{"endpoint", "domain"})
 
 	// HAProxy endpoint health
 	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_haproxy_endpoint_up",
 		Help: "Indicates if HAProxy endpoint is reachable (1 = up, 0 = down)",
+	}, []string{"endpoint"})
+	HAProxyEndpointV3Ready = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_haproxy_endpoint_v3_ready",
+		Help: "Indicates if HAProxy endpoint exposes the Data Plane API v3 certificate storage API (1 = ready, 0 = waiting)",
+	}, []string{"endpoint"})
+	HAProxyEndpointWorking = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_haproxy_endpoint_working",
+		Help: "Indicates if certificatee is actively syncing certificates for the HAProxy endpoint (1 = working, 0 = not working)",
 	}, []string{"endpoint"})
 	LastSyncTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_last_sync_timestamp_seconds",

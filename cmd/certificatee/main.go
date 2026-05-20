@@ -44,8 +44,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	healthState := &syncHealthState{}
-	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient, haproxyClients, healthState, cfg.Certificatee.UpdateInterval))
+	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, newCertificateeHealthChecker(vaultClient, haproxyClients))
 	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
 	logger.Infof("Configured %d HAProxy endpoint(s)", len(haproxyClients))
@@ -61,19 +60,13 @@ func main() {
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
-		healthState.Mark(err)
 		logger.Error(err)
-	} else {
-		healthState.Mark(nil)
 	}
 
 	for range ticker.C {
 		if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients); err != nil {
-			healthState.Mark(err)
 			logger.Error(err)
-			continue
 		}
-		healthState.Mark(nil)
 	}
 }
 
@@ -99,12 +92,23 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	// Get list of certificates from HAProxy with file paths for lookups
 	certRefs, err := haproxyClient.ListCertificateRefs()
 	if err != nil {
+		if haproxy.IsV3UnavailableError(err) {
+			certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(1)
+			certmetrics.HAProxyEndpointV3Ready.WithLabelValues(endpoint).Set(0)
+			certmetrics.HAProxyEndpointWorking.WithLabelValues(endpoint).Set(0)
+			logger.Infof("[%s] HAProxy Data Plane API v3 certificate storage endpoint not available yet, waiting for upgrade", endpoint)
+			return nil
+		}
+
 		certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(0)
+		certmetrics.HAProxyEndpointV3Ready.WithLabelValues(endpoint).Set(0)
+		certmetrics.HAProxyEndpointWorking.WithLabelValues(endpoint).Set(0)
 		return fmt.Errorf("failed to list certificates: %w", err)
 	}
 
 	// Mark endpoint as up and record sync timestamp
 	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint).Set(1)
+	certmetrics.HAProxyEndpointV3Ready.WithLabelValues(endpoint).Set(1)
 	certmetrics.LastSyncTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
 	certmetrics.CertificatesTotal.WithLabelValues(endpoint).Set(float64(len(certRefs)))
 
@@ -132,12 +136,19 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 		haproxyCert, err := haproxyClient.GetCertificateDetail(certPath)
 		if err != nil {
-			errs = append(errs, err)
-			logger.Errorf("[%s] failed to get dataplane metadata for %s: %v", endpoint, certPath, err)
-			continue
+			certmetrics.CertificateMetadataLookupFailures.WithLabelValues(endpoint, domain).Inc()
+
+			if strings.Contains(err.Error(), "status 404") {
+				logger.Warnf("[%s] missing dataplane metadata for %s, falling back to vault expiry only: %v", endpoint, certPath, err)
+				haproxyCert = nil
+			} else {
+				errs = append(errs, err)
+				logger.Errorf("[%s] failed to get dataplane metadata for %s: %v", endpoint, certPath, err)
+				continue
+			}
 		}
 
-		if !haproxyCert.NotAfter.IsZero() {
+		if haproxyCert != nil && !haproxyCert.NotAfter.IsZero() {
 			certmetrics.CertificateNotAfterTimestamp.WithLabelValues(endpoint, domain).Set(float64(haproxyCert.NotAfter.Unix()))
 		}
 
@@ -173,6 +184,11 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 	// Record expiring certificates count
 	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
+	if len(errs) == 0 {
+		certmetrics.HAProxyEndpointWorking.WithLabelValues(endpoint).Set(1)
+	} else {
+		certmetrics.HAProxyEndpointWorking.WithLabelValues(endpoint).Set(0)
+	}
 
 	return errors.Join(errs...)
 }
@@ -188,7 +204,12 @@ func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, hapr
 	}
 
 	if haproxyCert == nil {
-		return true, "certificate metadata missing in haproxy", true, nil
+		threshold := time.Now().AddDate(0, 0, renewBeforeDays)
+		isExpiring = vaultCert.NotAfter.Before(threshold)
+		if isExpiring {
+			return true, fmt.Sprintf("vault certificate expires on %s (haproxy metadata unavailable)", vaultCert.NotAfter.Format(time.RFC3339)), true, nil
+		}
+		return false, "", false, nil
 	}
 
 	if haproxyCert.NotAfter.IsZero() {
