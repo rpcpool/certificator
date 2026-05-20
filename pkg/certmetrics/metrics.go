@@ -58,6 +58,10 @@ var (
 		Name: "certificatee_certificate_not_after_timestamp_seconds",
 		Help: "Unix timestamp of the certificate not_after value reported by the HAProxy Data Plane API",
 	}, []string{"endpoint", "domain"})
+	CertificateMetadataLookupFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "certificatee_certificate_metadata_lookup_failures_total",
+		Help: "Total number of HAProxy Data Plane API per-certificate metadata lookup failures",
+	}, []string{"endpoint", "domain"})
 
 	// HAProxy endpoint health
 	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
