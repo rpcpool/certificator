@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+
 	"github.com/vinted/certificator/pkg/vault"
 )
 
