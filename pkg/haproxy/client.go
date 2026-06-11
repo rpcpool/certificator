@@ -168,7 +168,7 @@ func (c *Client) getConfigVersion() (string, error) {
 	return version, nil
 }
 
-// SSLCertificateEntry represents an SSL certificate entry from storage API
+// SSLCertificateEntry represents an SSL certificate entry from the Data Plane API.
 type SSLCertificateEntry struct {
 	File        string `json:"file"`
 	StorageName string `json:"storage_name"`
@@ -199,12 +199,12 @@ type CertificateDetail struct {
 	Serial      string
 }
 
-// CertificateRef holds both display name and file path for a certificate
+// CertificateRef holds both display and runtime API names for a certificate.
 type CertificateRef struct {
-	// DisplayName is the storage_name or filename for display purposes
+	// DisplayName is the filename used for logs and Vault domain extraction.
 	DisplayName string
-	// FilePath is the full file path used for API lookups
-	FilePath string
+	// APIName is the DPAPI runtime ssl_certs name used for detail and update calls.
+	APIName string
 }
 
 // ListCertificates returns a list of certificates from HAProxy Data Plane API
@@ -221,10 +221,9 @@ func (c *Client) ListCertificates() ([]string, error) {
 	return certNames, nil
 }
 
-// ListCertificateRefs returns a list of certificate references with both display names and file paths
+// ListCertificateRefs returns the certificates currently loaded by HAProxy.
 func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
-	// Use storage API endpoint for listing SSL certificates
-	resp, err := c.doRequest("GET", "/v3/services/haproxy/storage/ssl_certificates", nil, "")
+	resp, err := c.doRequest("GET", "/v3/services/haproxy/runtime/ssl_certs", nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +231,7 @@ func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("failed to list certificates: status %d, body: %s", resp.StatusCode, string(body))
+		return nil, errors.Errorf("failed to list live certificates: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	var certs []SSLCertificateEntry
@@ -242,34 +241,31 @@ func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 
 	var refs []CertificateRef
 	for _, cert := range certs {
-		ref := CertificateRef{
-			FilePath: cert.File,
+		apiName := cert.StorageName
+		if apiName == "" {
+			apiName = cert.File
 		}
-		// Prefer storage_name for display, fall back to file path
-		if cert.StorageName != "" {
-			ref.DisplayName = cert.StorageName
-		} else if cert.File != "" {
-			ref.DisplayName = cert.File
+
+		displayName := cert.Description
+		if displayName == "" {
+			displayName = apiName
 		}
-		if ref.DisplayName != "" || ref.FilePath != "" {
-			refs = append(refs, ref)
+
+		if apiName != "" && displayName != "" {
+			refs = append(refs, CertificateRef{
+				DisplayName: displayName,
+				APIName:     apiName,
+			})
 		}
 	}
 
 	return refs, nil
 }
 
-func IsV3UnavailableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "path /v3/services/haproxy/storage/ssl_certificates was not found")
-}
-
-// GetCertificateDetail returns Data Plane API metadata for a specific
-// certificate file.
+// GetCertificateDetail returns live HAProxy certificate metadata from the
+// Data Plane API v3 runtime endpoint.
 func (c *Client) GetCertificateDetail(certName string) (*CertificateDetail, error) {
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s", url.PathEscape(certName))
+	path := fmt.Sprintf("/v3/services/haproxy/runtime/ssl_certs/%s", url.PathEscape(certName))
 	resp, err := c.doRequest("GET", path, nil, "")
 	if err != nil {
 		return nil, err
@@ -308,16 +304,25 @@ func (c *Client) GetCertificateDetail(certName string) (*CertificateDetail, erro
 	}, nil
 }
 
-// UpdateCertificate uploads and commits a certificate update via Data Plane API
+// UpdateCertificate uploads a replacement certificate to the live HAProxy
+// runtime via Data Plane API v3.
 func (c *Client) UpdateCertificate(certName, pemData string) error {
-	version, err := c.getConfigVersion()
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("file_upload", certName)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed to create form file")
+	}
+	if _, err := part.Write([]byte(pemData)); err != nil {
+		return errors.Wrap(err, "failed to write certificate data")
+	}
+	if err := writer.Close(); err != nil {
+		return errors.Wrap(err, "failed to close multipart writer")
 	}
 
-	// Send PUT request to replace certificate
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?version=%s", url.PathEscape(certName), url.QueryEscape(version))
-	resp, err := c.doRequest("PUT", path, strings.NewReader(pemData), "text/plain")
+	path := fmt.Sprintf("/v3/services/haproxy/runtime/ssl_certs/%s", url.PathEscape(certName))
+	resp, err := c.doRequest("PUT", path, &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
 	}

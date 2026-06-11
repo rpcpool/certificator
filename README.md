@@ -16,7 +16,7 @@ A daemon that synchronizes certificates from Vault to HAProxy using the HAProxy 
 - The certificate is expiring within the configured threshold (default: 30 days)
 - The certificate serial number differs from the one stored in Vault
 
-During rollout, `certificatee` tolerates mixed HAProxy Data Plane API versions. If an endpoint is still on v2, unreachable, or unhealthy, `certificatee` itself stays healthy, reports the endpoint state via metrics, and starts syncing automatically once the v3 certificate storage API becomes available.
+`certificatee` requires HAProxy Data Plane API v3. It reads expiry and serial metadata from HAProxy's live runtime certificate state and uses Vault only as the source for replacement certificate payloads.
 
 ## Configuration
 
@@ -61,8 +61,8 @@ Certificatee uses the HAProxy Data Plane API to update certificates at runtime w
 - **Basic authentication**: Authenticate using username/password credentials
 - **Automatic retries**: Connections are retried with exponential backoff (default: 3 retries, 1-30s delays)
 - **Graceful degradation**: If one HAProxy instance is unreachable, the tool continues updating reachable instances
-- **REST API**: Certificates are managed via the HAProxy Data Plane API v3 `/v3/services/haproxy/storage/ssl_certificates` endpoints
-- **Mixed-version rollout tolerance**: v2-only endpoints are treated as waiting, not fatal, until the v3 certificate storage API is available
+- **REST API**: Certificates are managed via the HAProxy Data Plane API v3 `/v3/services/haproxy/runtime/ssl_certs` endpoints
+- **Live certificate state**: Expiry checks use HAProxy's currently loaded certificate metadata, not Vault certificate expiry
 
 ### HAProxy Data Plane API Configuration
 
@@ -90,7 +90,7 @@ Certificate files must be named after the domain (e.g., `/etc/haproxy/certs/exam
 Certificatee exposes Prometheus metrics for monitoring:
 
 - `GET /metrics` exposes Prometheus metrics.
-- `GET /health` returns `200 OK` when the process can still reach Vault. HAProxy Data Plane API reachability and rollout state are reported via metrics and do not make the process unhealthy in Nomad.
+- `GET /health` returns `200 OK` when the process can still reach Vault. HAProxy Data Plane API failures are reported via metrics and logs.
 
 ### General Metrics
 
@@ -104,9 +104,9 @@ Certificatee exposes Prometheus metrics for monitoring:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `certificatee_haproxy_endpoint_up` | Gauge | endpoint, state | Endpoint rollout state. `state="reachable"` means the DPAPI endpoint is reachable, `state="v3_ready"` means the v3 certificate storage API is available, and `state="working"` means certificatee is actively syncing that endpoint |
-| `certificatee_certificate_not_after_timestamp_seconds` | Gauge | endpoint, domain | Certificate expiry reported by the HAProxy Data Plane API |
-| `certificatee_certificate_metadata_lookup_failures_total` | Counter | endpoint, domain | Per-certificate DPAPI metadata lookups that failed and fell back to Vault-only expiry checks |
+| `certificatee_haproxy_endpoint_up` | Gauge | endpoint, state | Endpoint state. `state="reachable"` and `state="v3_ready"` mean the v3 runtime API is available, and `state="working"` means certificatee processed the endpoint without certificate errors |
+| `certificatee_certificate_not_after_timestamp_seconds` | Gauge | endpoint, domain | Live certificate expiry reported by the HAProxy Data Plane API runtime endpoint |
+| `certificatee_certificate_metadata_lookup_failures_total` | Counter | endpoint, domain | Per-certificate DPAPI runtime metadata lookups that failed |
 | `certificatee_haproxy_connections_total` | Counter | endpoint, status | Total connection attempts (status: success/failure) |
 | `certificatee_haproxy_connection_retries_total` | Counter | endpoint | Connection retry attempts |
 | `certificatee_haproxy_certificates_checked_total` | Counter | endpoint | Certificates checked per endpoint |
