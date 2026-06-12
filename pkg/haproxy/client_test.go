@@ -117,6 +117,9 @@ func TestNormalizeSerial(t *testing.T) {
 		{"1f:52:02:e0", "1F5202E0"},
 		{"  1F5202E0  ", "1F5202E0"},
 		{"1F-52-02-E0", "1F5202E0"},
+		{"01F5202E0", "1F5202E0"},
+		{"00:1f:52:02:e0", "1F5202E0"},
+		{"0000", "0"},
 		{"", ""},
 	}
 
@@ -448,6 +451,32 @@ func TestListCertificates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestListCertificateRefsReturnsStatusError(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+
+	mock.SetHandler("GET", "/v3/services/haproxy/runtime/ssl_certs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"path not found"}`))
+	})
+
+	client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	_, err = client.ListCertificateRefs()
+	if err == nil {
+		t.Fatal("ListCertificateRefs() error = nil, want status error")
+	}
+	if !IsHTTPStatus(err, http.StatusNotFound) {
+		t.Fatalf("IsHTTPStatus(err, 404) = false, err = %v", err)
 	}
 }
 

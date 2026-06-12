@@ -3,10 +3,16 @@ package main
 import (
 	"crypto/x509"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/sirupsen/logrus"
+	"github.com/vinted/certificator/pkg/certmetrics"
+	"github.com/vinted/certificator/pkg/config"
 	"github.com/vinted/certificator/pkg/haproxy"
 )
 
@@ -76,4 +82,52 @@ func TestShouldUpdateForSerialMismatch(t *testing.T) {
 			t.Fatalf("shouldUpdate=%v reason=%q, want no update", shouldUpdate, reason)
 		}
 	})
+
+	t.Run("ignores leading zero serial padding", func(t *testing.T) {
+		shouldUpdate, reason := shouldUpdateForSerialMismatch(vaultCert, &haproxy.CertificateDetail{Serial: "01:F5:20:2E:0"})
+		if shouldUpdate || reason != "" {
+			t.Fatalf("shouldUpdate=%v reason=%q, want no update", shouldUpdate, reason)
+		}
+	})
+}
+
+func TestProcessHAProxyEndpointSkipsUnsupportedDataPlaneAPI(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/services/haproxy/runtime/ssl_certs" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"path /v3/services/haproxy/runtime/ssl_certs was not found"}`))
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
+	err = processHAProxyEndpoint(logger, config.Config{}, nil, haproxyClient, healthChecker)
+	if err != nil {
+		t.Fatalf("processHAProxyEndpoint() error = %v, want nil", err)
+	}
+
+	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "reachable")); got != 1 {
+		t.Fatalf("reachable metric = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "v3_ready")); got != 0 {
+		t.Fatalf("v3_ready metric = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "v3_unsupported")); got != 1 {
+		t.Fatalf("v3_unsupported metric = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "working")); got != 0 {
+		t.Fatalf("working metric = %v, want 0", got)
+	}
+	if lastSync := healthChecker.lastSync(); !lastSync.IsZero() {
+		t.Fatalf("health last sync = %s, want zero", lastSync)
+	}
 }
