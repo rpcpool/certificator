@@ -46,6 +46,33 @@ type ClientConfig struct {
 	Timeout            time.Duration
 }
 
+// UnexpectedStatusError is returned when the Data Plane API responds with an
+// HTTP status that is not valid for the requested operation.
+type UnexpectedStatusError struct {
+	Operation  string
+	StatusCode int
+	Body       string
+}
+
+func (e *UnexpectedStatusError) Error() string {
+	return fmt.Sprintf("%s: status %d, body: %s", e.Operation, e.StatusCode, e.Body)
+}
+
+// IsHTTPStatus reports whether err wraps an UnexpectedStatusError with the
+// given status code.
+func IsHTTPStatus(err error, statusCode int) bool {
+	var statusErr *UnexpectedStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == statusCode
+}
+
+func unexpectedStatusError(operation string, statusCode int, body []byte) error {
+	return &UnexpectedStatusError{
+		Operation:  operation,
+		StatusCode: statusCode,
+		Body:       string(body),
+	}
+}
+
 // NewClient creates a new HAProxy Data Plane API client
 func NewClient(cfg ClientConfig, logger *logrus.Logger) (*Client, error) {
 	if cfg.BaseURL == "" {
@@ -231,7 +258,7 @@ func (c *Client) ListCertificateRefs() ([]CertificateRef, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, errors.Errorf("failed to list live certificates: status %d, body: %s", resp.StatusCode, string(body))
+		return nil, unexpectedStatusError("failed to list live certificates", resp.StatusCode, body)
 	}
 
 	var certs []SSLCertificateEntry
@@ -441,7 +468,8 @@ func IsExpiring(certInfo *CertInfo, renewBeforeDays int) bool {
 }
 
 // NormalizeSerial normalizes a certificate serial number for comparison.
-// Removes non-hex characters and converts to uppercase.
+// Removes non-hex characters, converts to uppercase, and strips insignificant
+// leading zeroes.
 func NormalizeSerial(serial string) string {
 	var b strings.Builder
 	b.Grow(len(serial))
@@ -457,7 +485,17 @@ func NormalizeSerial(serial string) string {
 		}
 	}
 
-	return b.String()
+	normalized := b.String()
+	if normalized == "" {
+		return ""
+	}
+
+	trimmed := strings.TrimLeft(normalized, "0")
+	if trimmed == "" {
+		return "0"
+	}
+
+	return trimmed
 }
 
 // logrusLeveledLogger wraps a logrus.Logger to implement retryablehttp.LeveledLogger

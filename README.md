@@ -90,7 +90,7 @@ Certificate files must be named after the domain (e.g., `/etc/haproxy/certs/exam
 Certificatee exposes Prometheus metrics for monitoring:
 
 - `GET /metrics` exposes Prometheus metrics.
-- `GET /health` returns `200 OK` when the process can still reach Vault. HAProxy Data Plane API failures are reported via metrics and logs.
+- `GET /health` returns `200 OK` when the process can still reach Vault and at least one HAProxy Data Plane API endpoint has completed a recent v3 runtime certificate sync probe. Non-v3 endpoints are skipped and reported via metrics and logs.
 
 ### General Metrics
 
@@ -104,7 +104,7 @@ Certificatee exposes Prometheus metrics for monitoring:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `certificatee_haproxy_endpoint_up` | Gauge | endpoint, state | Endpoint state. `state="reachable"` and `state="v3_ready"` mean the v3 runtime API is available, and `state="working"` means certificatee processed the endpoint without certificate errors |
+| `certificatee_haproxy_endpoint_up` | Gauge | endpoint, state | Endpoint state. `state="reachable"` and `state="v3_ready"` mean the v3 runtime API is available, `state="v3_unsupported"` means the endpoint did not expose the v3 runtime certificate API on the last run, and `state="working"` means certificatee processed the endpoint without certificate errors |
 | `certificatee_certificate_not_after_timestamp_seconds` | Gauge | endpoint, domain | Live certificate expiry reported by the HAProxy Data Plane API runtime endpoint |
 | `certificatee_certificate_metadata_lookup_failures_total` | Counter | endpoint, domain | Per-certificate DPAPI runtime metadata lookups that failed |
 | `certificatee_haproxy_connections_total` | Counter | endpoint, status | Total connection attempts (status: success/failure) |
