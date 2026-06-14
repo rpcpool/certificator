@@ -66,11 +66,10 @@ var (
 		Help: "Total number of HAProxy Data Plane API per-certificate metadata lookup failures",
 	}, []string{"endpoint", "domain"})
 
-	// HAProxy endpoint health
-	HAProxyEndpointUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "certificatee_haproxy_endpoint_up",
-		Help: "Indicates HAProxy endpoint state for certificatee (1 = true, 0 = false)",
-	}, []string{"endpoint", "state"})
+	DataPlaneAPIVersion = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "certificatee_dataplaneapi_version",
+		Help: "Detected HAProxy Data Plane API version for certificatee endpoints (1 = detected version)",
+	}, []string{"endpoint", "version"})
 	LastSyncTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_last_sync_timestamp_seconds",
 		Help: "Unix timestamp of the last successful sync",

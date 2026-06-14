@@ -95,19 +95,19 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	certRefs, err := haproxyClient.ListCertificateRefs()
 	if err != nil {
 		if haproxy.IsHTTPStatus(err, http.StatusNotFound) {
-			setEndpointV3Unsupported(endpoint)
+			setDataPlaneAPIVersion(endpoint, "v2")
 			// Do not cache this state. Endpoints can be upgraded independently,
 			// so every sync run probes the v3 runtime certificate API again.
 			logger.Warnf("[%s] HAProxy Data Plane API does not expose the v3 runtime SSL certificate API; skipping endpoint this run: %v", endpoint, err)
 			return nil
 		}
 
-		setEndpointState(endpoint, 0, 0, 0)
+		setDataPlaneAPIVersion(endpoint, "")
 		return err
 	}
 
 	// Mark endpoint as up and record sync timestamp
-	setEndpointState(endpoint, 1, 1, 0)
+	setDataPlaneAPIVersion(endpoint, "v3")
 	healthChecker.MarkEndpointSyncSuccess()
 	certmetrics.LastSyncTimestamp.WithLabelValues(endpoint).SetToCurrentTime()
 	certmetrics.CertificatesTotal.WithLabelValues(endpoint).Set(float64(len(certRefs)))
@@ -179,27 +179,18 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 	// Record expiring certificates count
 	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
-	if len(errs) == 0 {
-		setEndpointState(endpoint, 1, 1, 1)
-	} else {
-		setEndpointState(endpoint, 1, 1, 0)
-	}
 
 	return errors.Join(errs...)
 }
 
-func setEndpointState(endpoint string, reachable, v3Ready, working float64) {
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "reachable").Set(reachable)
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "v3_ready").Set(v3Ready)
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "v3_unsupported").Set(0)
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "working").Set(working)
-}
-
-func setEndpointV3Unsupported(endpoint string) {
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "reachable").Set(1)
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "v3_ready").Set(0)
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "v3_unsupported").Set(1)
-	certmetrics.HAProxyEndpointUp.WithLabelValues(endpoint, "working").Set(0)
+func setDataPlaneAPIVersion(endpoint, version string) {
+	for _, candidate := range []string{"v2", "v3"} {
+		value := 0.0
+		if version == candidate {
+			value = 1
+		}
+		certmetrics.DataPlaneAPIVersion.WithLabelValues(endpoint, candidate).Set(value)
+	}
 }
 
 func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
