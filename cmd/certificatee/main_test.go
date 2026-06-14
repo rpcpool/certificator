@@ -115,19 +115,48 @@ func TestProcessHAProxyEndpointSkipsUnsupportedDataPlaneAPI(t *testing.T) {
 		t.Fatalf("processHAProxyEndpoint() error = %v, want nil", err)
 	}
 
-	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "reachable")); got != 1 {
-		t.Fatalf("reachable metric = %v, want 1", got)
+	if got := testutil.ToFloat64(certmetrics.DataPlaneAPIVersion.WithLabelValues(server.URL, "v2")); got != 1 {
+		t.Fatalf("dataplaneapi v2 metric = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "v3_ready")); got != 0 {
-		t.Fatalf("v3_ready metric = %v, want 0", got)
-	}
-	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "v3_unsupported")); got != 1 {
-		t.Fatalf("v3_unsupported metric = %v, want 1", got)
-	}
-	if got := testutil.ToFloat64(certmetrics.HAProxyEndpointUp.WithLabelValues(server.URL, "working")); got != 0 {
-		t.Fatalf("working metric = %v, want 0", got)
+	if got := testutil.ToFloat64(certmetrics.DataPlaneAPIVersion.WithLabelValues(server.URL, "v3")); got != 0 {
+		t.Fatalf("dataplaneapi v3 metric = %v, want 0", got)
 	}
 	if lastSync := healthChecker.lastSync(); !lastSync.IsZero() {
 		t.Fatalf("health last sync = %s, want zero", lastSync)
+	}
+}
+
+func TestProcessHAProxyEndpointMarksV3ReadyEndpoint(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/services/haproxy/runtime/ssl_certs" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
+	err = processHAProxyEndpoint(logger, config.Config{}, nil, haproxyClient, healthChecker)
+	if err != nil {
+		t.Fatalf("processHAProxyEndpoint() error = %v, want nil", err)
+	}
+
+	if got := testutil.ToFloat64(certmetrics.DataPlaneAPIVersion.WithLabelValues(server.URL, "v2")); got != 0 {
+		t.Fatalf("dataplaneapi v2 metric = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(certmetrics.DataPlaneAPIVersion.WithLabelValues(server.URL, "v3")); got != 1 {
+		t.Fatalf("dataplaneapi v3 metric = %v, want 1", got)
+	}
+	if lastSync := healthChecker.lastSync(); lastSync.IsZero() {
+		t.Fatal("health last sync is zero, want successful sync timestamp")
 	}
 }
