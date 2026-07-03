@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,6 +20,10 @@ import (
 var (
 	version = "dev" // GoReleaser will inject the Git tag here
 )
+
+type vaultCertificateDeleter interface {
+	KVDelete(path string) error
+}
 
 func main() {
 	cfg, err := config.LoadConfig()
@@ -67,6 +70,14 @@ func main() {
 			}
 			logger.Infof("checking certificate for %s", mainDomain)
 
+			deleted, err := deleteExpiredVaultCertificate(mainDomain, cert, vaultClient, logger)
+			if err != nil {
+				return err
+			}
+			if deleted {
+				cert = nil
+			}
+
 			needsReissuing, err := certificate.NeedsReissuing(cert, allDomains, cfg.RenewBeforeDays, logger)
 			if err != nil {
 				return err
@@ -83,9 +94,6 @@ func main() {
 				cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement); err != nil {
 				certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
 				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
-				if cleanupErr := deleteExpiredVaultCertificateAfterRenewalFailure(mainDomain, cert, vaultClient, logger); cleanupErr != nil {
-					return errors.Join(err, cleanupErr)
-				}
 				return err
 			}
 			certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
@@ -101,15 +109,19 @@ func main() {
 	}
 }
 
-func deleteExpiredVaultCertificateAfterRenewalFailure(mainDomain string, cert *x509.Certificate, vaultClient *vault.VaultClient, logger *logrus.Logger) error {
-	if !certificate.IsExpired(cert, time.Now()) {
-		return nil
+func deleteExpiredVaultCertificate(mainDomain string, cert *x509.Certificate, vaultClient vaultCertificateDeleter, logger *logrus.Logger) (bool, error) {
+	return deleteExpiredVaultCertificateAt(mainDomain, cert, vaultClient, logger, time.Now())
+}
+
+func deleteExpiredVaultCertificateAt(mainDomain string, cert *x509.Certificate, vaultClient vaultCertificateDeleter, logger *logrus.Logger, now time.Time) (bool, error) {
+	if !certificate.IsExpired(cert, now) {
+		return false, nil
 	}
 
-	logger.Warnf("renewal failed for %s and existing Vault certificate expired on %s; deleting expired Vault certificate", mainDomain, cert.NotAfter.Format(time.RFC3339))
+	logger.Warnf("existing Vault certificate for %s expired on %s; deleting expired Vault certificate before renewal", mainDomain, cert.NotAfter.Format(time.RFC3339))
 	if err := certificate.DeleteCertificate(mainDomain, vaultClient); err != nil {
-		return fmt.Errorf("failed deleting expired Vault certificate for %s: %w", mainDomain, err)
+		return false, fmt.Errorf("failed deleting expired Vault certificate for %s: %w", mainDomain, err)
 	}
 
-	return nil
+	return true, nil
 }
