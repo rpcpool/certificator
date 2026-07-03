@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	legoLog "github.com/go-acme/lego/v4/log"
+	"github.com/sirupsen/logrus"
 	"github.com/sourcegraph/conc/pool"
 	"github.com/vinted/certificator/pkg/acme"
 	"github.com/vinted/certificator/pkg/certificate"
@@ -78,6 +83,9 @@ func main() {
 				cfg.DNSAddress, cfg.Acme.DNSChallengeProvider, cfg.Acme.DNSPropagationRequirement); err != nil {
 				certmetrics.CertificatesRenewalFailures.WithLabelValues(mainDomain).Inc()
 				certmetrics.CertificatesChecked.WithLabelValues(mainDomain, "failure").Inc()
+				if cleanupErr := deleteExpiredVaultCertificateAfterRenewalFailure(mainDomain, cert, vaultClient, logger); cleanupErr != nil {
+					return errors.Join(err, cleanupErr)
+				}
 				return err
 			}
 			certmetrics.CertificatesRenewed.WithLabelValues(mainDomain).Inc()
@@ -91,4 +99,17 @@ func main() {
 	if err := workerPool.Wait(); err != nil {
 		logger.Fatal(err)
 	}
+}
+
+func deleteExpiredVaultCertificateAfterRenewalFailure(mainDomain string, cert *x509.Certificate, vaultClient *vault.VaultClient, logger *logrus.Logger) error {
+	if !certificate.IsExpired(cert, time.Now()) {
+		return nil
+	}
+
+	logger.Warnf("renewal failed for %s and existing Vault certificate expired on %s; deleting expired Vault certificate", mainDomain, cert.NotAfter.Format(time.RFC3339))
+	if err := certificate.DeleteCertificate(mainDomain, vaultClient); err != nil {
+		return fmt.Errorf("failed deleting expired Vault certificate for %s: %w", mainDomain, err)
+	}
+
+	return nil
 }

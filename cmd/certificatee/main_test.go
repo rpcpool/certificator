@@ -63,6 +63,55 @@ func TestShouldUpdateForLiveExpiry(t *testing.T) {
 	})
 }
 
+func TestValidateVaultCertificateForUpdate(t *testing.T) {
+	now := time.Date(2026, time.July, 3, 12, 0, 0, 0, time.UTC)
+
+	t.Run("rejects missing vault certificate", func(t *testing.T) {
+		err := validateVaultCertificateForUpdateAt("example.com", nil, &haproxy.CertificateDetail{}, now)
+		if err == nil || !strings.Contains(err.Error(), "does not exist in vault") {
+			t.Fatalf("expected missing vault certificate error, got %v", err)
+		}
+	})
+
+	t.Run("rejects expired vault certificate", func(t *testing.T) {
+		vaultCert := &x509.Certificate{
+			NotAfter: now.Add(-time.Minute),
+		}
+
+		err := validateVaultCertificateForUpdateAt("example.com", vaultCert, &haproxy.CertificateDetail{}, now)
+		if err == nil || !strings.Contains(err.Error(), "Vault certificate expired") {
+			t.Fatalf("expected expired vault certificate error, got %v", err)
+		}
+	})
+
+	t.Run("rejects certificate expiry downgrade", func(t *testing.T) {
+		vaultCert := &x509.Certificate{
+			NotAfter: now.AddDate(0, 0, 30),
+		}
+		liveCert := &haproxy.CertificateDetail{
+			NotAfter: now.AddDate(0, 0, 60),
+		}
+
+		err := validateVaultCertificateForUpdateAt("example.com", vaultCert, liveCert, now)
+		if err == nil || !strings.Contains(err.Error(), "before live HAProxy certificate") {
+			t.Fatalf("expected downgrade rejection, got %v", err)
+		}
+	})
+
+	t.Run("accepts valid non-downgrade vault certificate", func(t *testing.T) {
+		vaultCert := &x509.Certificate{
+			NotAfter: now.AddDate(0, 0, 90),
+		}
+		liveCert := &haproxy.CertificateDetail{
+			NotAfter: now.AddDate(0, 0, 60),
+		}
+
+		if err := validateVaultCertificateForUpdateAt("example.com", vaultCert, liveCert, now); err != nil {
+			t.Fatalf("validateVaultCertificateForUpdateAt() error = %v, want nil", err)
+		}
+	})
+}
+
 func TestShouldUpdateForSerialMismatch(t *testing.T) {
 	vaultCert := &x509.Certificate{SerialNumber: big.NewInt(0x1f5202e0)}
 
