@@ -21,6 +21,17 @@ var (
 	version = "dev" // GoReleaser will inject the Git tag here
 )
 
+type certificateStore interface {
+	KVRead(path string) (map[string]any, error)
+}
+
+type certificateSyncResult struct {
+	isExpiring     bool
+	storageSynced  bool
+	runtimeUpdated bool
+	reason         string
+}
+
 func main() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -73,7 +84,7 @@ func main() {
 	}
 }
 
-func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClients []*haproxy.Client, healthChecker *certificateeHealthChecker) error {
+func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClient certificateStore, haproxyClients []*haproxy.Client, healthChecker *certificateeHealthChecker) error {
 	var allErrs []error
 
 	for _, haproxyClient := range haproxyClients {
@@ -89,7 +100,7 @@ func maybeUpdateCertificates(logger *logrus.Logger, cfg config.Config, vaultClie
 	return errors.Join(allErrs...)
 }
 
-func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client, healthChecker *certificateeHealthChecker) error {
+func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClient certificateStore, haproxyClient *haproxy.Client, healthChecker *certificateeHealthChecker) error {
 	endpoint := haproxyClient.Endpoint()
 
 	certRefs, err := haproxyClient.ListCertificateRefs()
@@ -148,34 +159,32 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		}
 
 		// Use HAProxy's live certificate metadata for expiry. Vault provides the
-		// replacement payload and serial used to detect a newer issued certificate.
-		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, haproxyCert, cfg.Certificatee.RenewBeforeDays)
+		// replacement payload persisted to storage and, when needed, runtime.
+		syncResult, err := syncCertificate(apiName, domain, vaultClient, haproxyClient, haproxyCert, cfg.Certificatee.RenewBeforeDays)
 
 		// Track expiring certificates even when Vault replacement material is invalid.
-		if isExpiring {
+		if syncResult.isExpiring {
 			expiringCount++
 		}
 
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
+			certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
 			continue
 		}
 
-		if shouldUpdate {
-			logger.Infof("[%s] Certificate %s needs update: %s", endpoint, displayName, reason)
-
-			if err := updateCertificate(apiName, domain, vaultClient, haproxyClient, haproxyCert); err != nil {
-				errs = append(errs, err)
-				logger.Errorf("[%s] %v", endpoint, err)
-				certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
-			} else {
-				certmetrics.CertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
-				logger.Infof("[%s] Certificate %s updated successfully!", endpoint, displayName)
-			}
-		} else {
-			logger.Infof("[%s] Certificate %s is up to date", endpoint, displayName)
+		if syncResult.storageSynced {
+			logger.Infof("[%s] Certificate %s persisted to storage", endpoint, displayName)
 		}
+
+		if syncResult.runtimeUpdated {
+			certmetrics.CertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
+			logger.Infof("[%s] Certificate %s updated successfully: %s", endpoint, displayName, syncResult.reason)
+			continue
+		}
+
+		logger.Infof("[%s] Certificate %s is up to date", endpoint, displayName)
 	}
 
 	// Record expiring certificates count
@@ -192,29 +201,6 @@ func setDataPlaneAPIVersion(endpoint, version string) {
 		}
 		certmetrics.DataPlaneAPIVersion.WithLabelValues(endpoint, candidate).Set(value)
 	}
-}
-
-func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
-	shouldUpdate, reason, isExpiring, err = shouldUpdateForLiveExpiry(domain, haproxyCert, renewBeforeDays)
-	if err != nil {
-		return shouldUpdate, reason, isExpiring, err
-	}
-
-	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
-	if err != nil {
-		return false, "", isExpiring, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
-	}
-
-	if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
-		return false, "", isExpiring, err
-	}
-
-	if shouldUpdate {
-		return true, reason, true, nil
-	}
-
-	shouldUpdate, reason = shouldUpdateForSerialMismatch(vaultCert, haproxyCert)
-	return shouldUpdate, reason, false, nil
 }
 
 func shouldUpdateForLiveExpiry(domain string, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
@@ -278,37 +264,65 @@ func parseVaultLeafCertificate(secrets map[string]any) (*x509.Certificate, error
 	return certificate.ParsePEMCertificate(certPEM)
 }
 
-func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client, haproxyCert *haproxy.CertificateDetail) error {
-	// Read certificate data from Vault
+func readVaultCertificateBundle(domain string, vaultClient certificateStore) (map[string]any, *x509.Certificate, error) {
 	certificateSecrets, err := vaultClient.KVRead(certificate.VaultCertLocation(domain))
 	if err != nil {
-		return fmt.Errorf("failed to read certificate data from vault for %s: %w", domain, err)
+		return nil, nil, fmt.Errorf("failed to read certificate data from vault for %s: %w", domain, err)
 	}
 
 	vaultCert, err := parseVaultLeafCertificate(certificateSecrets)
 	if err != nil {
-		return fmt.Errorf("failed to parse Vault certificate for %s: %w", domain, err)
-	}
-	if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
-		return err
+		return nil, nil, fmt.Errorf("failed to parse Vault certificate for %s: %w", domain, err)
 	}
 
-	// Build PEM bundle (certificate + private key)
+	return certificateSecrets, vaultCert, nil
+}
+
+func syncCertificate(certPath, domain string, vaultClient certificateStore, haproxyClient *haproxy.Client, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (certificateSyncResult, error) {
+	result := certificateSyncResult{}
+
+	shouldUpdateRuntime, reason, isExpiring, err := shouldUpdateForLiveExpiry(domain, haproxyCert, renewBeforeDays)
+	result.isExpiring = isExpiring
+	if err != nil {
+		return result, err
+	}
+
+	certificateSecrets, vaultCert, err := readVaultCertificateBundle(domain, vaultClient)
+	if err != nil {
+		return result, err
+	}
+
+	if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
+		return result, err
+	}
+
 	pemData, err := buildPEMBundle(certificateSecrets)
 	if err != nil {
-		return fmt.Errorf("failed to build PEM bundle for %s: %w", domain, err)
+		return result, fmt.Errorf("failed to build PEM bundle for %s: %w", domain, err)
 	}
 
 	storageCertName := haproxy.StorageCertificateName(certPath)
 	if err := haproxyClient.EnsureStorageCertificate(storageCertName, pemData); err != nil {
-		return fmt.Errorf("failed to persist certificate %s in HAProxy storage: %w", storageCertName, err)
+		return result, fmt.Errorf("failed to persist certificate %s in HAProxy storage: %w", storageCertName, err)
 	}
+	result.storageSynced = true
+
+	if !shouldUpdateRuntime {
+		shouldUpdateRuntime, reason = shouldUpdateForSerialMismatch(vaultCert, haproxyCert)
+	}
+
+	if !shouldUpdateRuntime {
+		return result, nil
+	}
+
+	result.reason = reason
 
 	if err := haproxyClient.UpdateCertificate(certPath, pemData); err != nil {
-		return fmt.Errorf("failed to update certificate %s in HAProxy runtime: %w", certPath, err)
+		return result, fmt.Errorf("failed to update certificate %s in HAProxy runtime: %w", certPath, err)
 	}
 
-	return nil
+	result.runtimeUpdated = true
+	return result, nil
 }
 
 // buildPEMBundle creates a PEM bundle from Vault certificate secrets
