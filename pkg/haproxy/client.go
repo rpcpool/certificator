@@ -203,27 +203,29 @@ type SSLCertificateEntry struct {
 }
 
 type sslCertificateDetailResponse struct {
-	File        string `json:"file"`
-	StorageName string `json:"storage_name"`
-	Description string `json:"description"`
-	Domains     string `json:"domains"`
-	Issuers     string `json:"issuers"`
-	NotAfter    string `json:"not_after"`
-	NotBefore   string `json:"not_before"`
-	Serial      string `json:"serial"`
+	File                    string `json:"file"`
+	StorageName             string `json:"storage_name"`
+	Description             string `json:"description"`
+	Domains                 string `json:"domains"`
+	Issuers                 string `json:"issuers"`
+	NotAfter                string `json:"not_after"`
+	NotBefore               string `json:"not_before"`
+	Serial                  string `json:"serial"`
+	SubjectAlternativeNames string `json:"subject_alternative_names"`
 }
 
 // CertificateDetail describes the current HAProxy certificate state reported by
 // the Data Plane API.
 type CertificateDetail struct {
-	File        string
-	StorageName string
-	Description string
-	Domains     string
-	Issuers     string
-	NotAfter    time.Time
-	NotBefore   time.Time
-	Serial      string
+	File                    string
+	StorageName             string
+	Description             string
+	Domains                 string
+	Issuers                 string
+	NotAfter                time.Time
+	NotBefore               time.Time
+	Serial                  string
+	SubjectAlternativeNames string
 }
 
 // CertificateRef holds both display and runtime API names for a certificate.
@@ -320,14 +322,15 @@ func (c *Client) GetCertificateDetail(certName string) (*CertificateDetail, erro
 	}
 
 	return &CertificateDetail{
-		File:        raw.File,
-		StorageName: raw.StorageName,
-		Description: raw.Description,
-		Domains:     raw.Domains,
-		Issuers:     raw.Issuers,
-		NotAfter:    notAfter,
-		NotBefore:   notBefore,
-		Serial:      raw.Serial,
+		File:                    raw.File,
+		StorageName:             raw.StorageName,
+		Description:             raw.Description,
+		Domains:                 raw.Domains,
+		Issuers:                 raw.Issuers,
+		NotAfter:                notAfter,
+		NotBefore:               notBefore,
+		Serial:                  raw.Serial,
+		SubjectAlternativeNames: raw.SubjectAlternativeNames,
 	}, nil
 }
 
