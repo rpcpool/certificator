@@ -72,9 +72,13 @@ func ParsePEMCertificate(certPEM string) (*x509.Certificate, error) {
 	return parsedCerts[0], nil
 }
 
+type vaultDeleter interface {
+	KVDelete(path string) error
+}
+
 // DeleteCertificate removes certificate data from Vault KV storage.
-func DeleteCertificate(domain string, vault *vault.VaultClient) error {
-	return vault.KVDelete(VaultCertLocation(domain))
+func DeleteCertificate(domain string, vaultClient vaultDeleter) error {
+	return vaultClient.KVDelete(VaultCertLocation(domain))
 }
 
 // IsExpired reports whether a certificate is already expired at now.
