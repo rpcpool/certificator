@@ -16,7 +16,7 @@ A daemon that synchronizes certificates from Vault to HAProxy using the HAProxy 
 - The certificate is expiring within the configured threshold (default: 30 days)
 - The certificate serial number differs from the one stored in Vault
 
-`certificatee` requires HAProxy Data Plane API v3. It reads expiry and serial metadata from HAProxy's live runtime certificate state and uses Vault only as the source for replacement certificate payloads.
+`certificatee` requires HAProxy Data Plane API v3. It reads expiry and serial metadata from HAProxy's live runtime certificate state and uses Vault only as the source for replacement certificate payloads. Replacement certificates are written to HAProxy storage with `skip_reload=true`, then written to HAProxy runtime so updates both survive future reloads and take effect immediately.
 
 ## Configuration
 
@@ -61,7 +61,7 @@ Certificatee uses the HAProxy Data Plane API to update certificates at runtime w
 - **Basic authentication**: Authenticate using username/password credentials
 - **Automatic retries**: Connections are retried with exponential backoff (default: 3 retries, 1-30s delays)
 - **Graceful degradation**: If one HAProxy instance is unreachable, the tool continues updating reachable instances
-- **REST API**: Certificates are managed via the HAProxy Data Plane API v3 `/v3/services/haproxy/runtime/ssl_certs` endpoints
+- **REST API**: Certificates are persisted via the HAProxy Data Plane API v3 `/v3/services/haproxy/storage/ssl_certificates` endpoints and activated via `/v3/services/haproxy/runtime/ssl_certs`
 - **Live certificate state**: Expiry checks use HAProxy's currently loaded certificate metadata, not Vault certificate expiry
 
 ### HAProxy Data Plane API Configuration

@@ -614,6 +614,70 @@ func TestGetCertificateDetail(t *testing.T) {
 	}
 }
 
+func TestUpdateStorageCertificate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	tests := []struct {
+		name       string
+		certName   string
+		pemData    string
+		statusCode int
+		wantErr    bool
+	}{
+		{
+			name:       "success - certificate replaced",
+			certName:   "example.com.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusOK,
+		},
+		{
+			name:       "success - accepted",
+			certName:   "example.com.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusAccepted,
+		},
+		{
+			name:       "error - not found",
+			certName:   "missing.pem",
+			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			statusCode: http.StatusNotFound,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
+
+			mock.SetHandler("PUT", "/v3/services/haproxy/storage/ssl_certificates/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("skip_reload") != "true" {
+					t.Errorf("skip_reload query = %q, want true", r.URL.Query().Get("skip_reload"))
+				}
+				if got := r.Header.Get("Content-Type"); got != "text/plain" {
+					t.Errorf("Content-Type = %q, want text/plain", got)
+				}
+				data, _ := io.ReadAll(r.Body)
+				if string(data) != tt.pemData {
+					t.Errorf("body = %q, want %q", string(data), tt.pemData)
+				}
+				w.WriteHeader(tt.statusCode)
+			})
+
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+
+			err = client.UpdateStorageCertificate(tt.certName, tt.pemData)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("UpdateStorageCertificate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCreateCertificate(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
@@ -630,27 +694,18 @@ func TestCreateCertificate(t *testing.T) {
 			certName:   "new.example.com.pem",
 			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
 			statusCode: http.StatusCreated,
-			wantErr:    false,
 		},
 		{
 			name:       "success - OK status",
 			certName:   "new.example.com.pem",
 			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
 			statusCode: http.StatusOK,
-			wantErr:    false,
 		},
 		{
 			name:       "error - conflict (already exists)",
 			certName:   "existing.pem",
 			pemData:    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
 			statusCode: http.StatusConflict,
-			wantErr:    true,
-		},
-		{
-			name:       "error - bad request",
-			certName:   "bad.pem",
-			pemData:    "invalid pem",
-			statusCode: http.StatusBadRequest,
 			wantErr:    true,
 		},
 	}
@@ -660,28 +715,19 @@ func TestCreateCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v3/services/haproxy/configuration/version", func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte("42"))
-			})
-
 			mock.SetHandler("POST", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Query().Get("version") != "42" {
-					t.Errorf("version query = %q, want %q", r.URL.Query().Get("version"), "42")
+				if r.URL.Query().Get("skip_reload") != "true" {
+					t.Errorf("skip_reload query = %q, want true", r.URL.Query().Get("skip_reload"))
 				}
-
-				// Verify content type is multipart
 				contentType := r.Header.Get("Content-Type")
 				if !strings.Contains(contentType, "multipart/form-data") {
 					t.Errorf("Expected multipart/form-data content type, got %s", contentType)
 				}
 
-				// Read the multipart form
-				err := r.ParseMultipartForm(10 << 20) // 10 MB
-				if err != nil {
+				if err := r.ParseMultipartForm(10 << 20); err != nil {
 					t.Errorf("Failed to parse multipart form: %v", err)
 				}
 
-				// Verify file was uploaded
 				file, header, err := r.FormFile("file_upload")
 				if err != nil {
 					t.Errorf("Failed to get file from form: %v", err)
@@ -709,6 +755,44 @@ func TestCreateCertificate(t *testing.T) {
 				t.Errorf("CreateCertificate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestEnsureStorageCertificateCreatesWhenMissing(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+
+	var created bool
+	mock.SetHandler("PUT", "/v3/services/haproxy/storage/ssl_certificates/example.com.pem", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mock.SetHandler("POST", "/v3/services/haproxy/storage/ssl_certificates", func(w http.ResponseWriter, r *http.Request) {
+		created = true
+		if r.URL.Query().Get("skip_reload") != "true" {
+			t.Errorf("skip_reload query = %q, want true", r.URL.Query().Get("skip_reload"))
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	if err := client.EnsureStorageCertificate("example.com.pem", "pem-data"); err != nil {
+		t.Fatalf("EnsureStorageCertificate() error = %v", err)
+	}
+	if !created {
+		t.Fatal("expected missing storage cert to be created")
+	}
+}
+
+func TestStorageCertificateName(t *testing.T) {
+	if got := StorageCertificateName("certs/_.devnet.rpcpool.com.pem"); got != "_.devnet.rpcpool.com.pem" {
+		t.Fatalf("StorageCertificateName() = %q, want _.devnet.rpcpool.com.pem", got)
 	}
 }
 

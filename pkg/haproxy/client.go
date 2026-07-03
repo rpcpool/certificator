@@ -332,7 +332,8 @@ func (c *Client) GetCertificateDetail(certName string) (*CertificateDetail, erro
 }
 
 // UpdateCertificate uploads a replacement certificate to the live HAProxy
-// runtime via Data Plane API v3.
+// runtime via Data Plane API v3. Runtime updates take effect immediately but
+// are not persisted across a full HAProxy restart.
 func (c *Client) UpdateCertificate(certName, pemData string) error {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -357,25 +358,39 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return errors.Errorf("failed to update certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+		return unexpectedStatusError(fmt.Sprintf("failed to update runtime certificate %s", certName), resp.StatusCode, body)
 	}
 
-	c.logger.Debugf("Updated certificate %s", certName)
+	c.logger.Debugf("Updated runtime certificate %s", certName)
 	return nil
 }
 
-// CreateCertificate creates a new certificate entry via Data Plane API
-func (c *Client) CreateCertificate(certName, pemData string) error {
-	version, err := c.getConfigVersion()
+// UpdateStorageCertificate replaces a certificate on disk without asking
+// Data Plane API to reload HAProxy. Certificatee updates runtime separately
+// after this write so the new certificate is both durable and active.
+func (c *Client) UpdateStorageCertificate(certName, pemData string) error {
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?skip_reload=true", url.PathEscape(certName))
+	resp, err := c.doRequest("PUT", path, strings.NewReader(pemData), "text/plain")
 	if err != nil {
 		return err
 	}
+	defer func() { _ = resp.Body.Close() }()
 
-	// Create multipart form data
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return unexpectedStatusError(fmt.Sprintf("failed to update storage certificate %s", certName), resp.StatusCode, body)
+	}
+
+	c.logger.Debugf("Updated storage certificate %s", certName)
+	return nil
+}
+
+// CreateCertificate creates a new certificate entry on disk without asking
+// Data Plane API to reload HAProxy.
+func (c *Client) CreateCertificate(certName, pemData string) error {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
-	// Add file part
 	part, err := writer.CreateFormFile("file_upload", certName)
 	if err != nil {
 		return errors.Wrap(err, "failed to create form file")
@@ -388,20 +403,37 @@ func (c *Client) CreateCertificate(certName, pemData string) error {
 		return errors.Wrap(err, "failed to close multipart writer")
 	}
 
-	// Send POST request to create certificate
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates?version=%s", url.QueryEscape(version))
-	resp, err := c.doRequest("POST", path, &buf, writer.FormDataContentType())
+	resp, err := c.doRequest("POST", "/v3/services/haproxy/storage/ssl_certificates?skip_reload=true", &buf, writer.FormDataContentType())
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return errors.Errorf("failed to create certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+		return unexpectedStatusError(fmt.Sprintf("failed to create storage certificate %s", certName), resp.StatusCode, body)
 	}
 
-	c.logger.Debugf("Created certificate %s", certName)
+	c.logger.Debugf("Created storage certificate %s", certName)
+	return nil
+}
+
+// EnsureStorageCertificate writes a certificate to disk, creating it if it does
+// not already exist. The write always uses skip_reload=true.
+func (c *Client) EnsureStorageCertificate(certName, pemData string) error {
+	if err := c.UpdateStorageCertificate(certName, pemData); err != nil {
+		if !IsHTTPStatus(err, http.StatusNotFound) {
+			return err
+		}
+
+		if err := c.CreateCertificate(certName, pemData); err != nil {
+			if IsHTTPStatus(err, http.StatusConflict) {
+				return c.UpdateStorageCertificate(certName, pemData)
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -455,6 +487,11 @@ func NormalizeDomainForVault(domain string) string {
 		return "*." + domain[2:]
 	}
 	return domain
+}
+
+func StorageCertificateName(certPath string) string {
+	parts := strings.Split(certPath, "/")
+	return parts[len(parts)-1]
 }
 
 // IsExpiring checks if a certificate is expiring within the given number of days

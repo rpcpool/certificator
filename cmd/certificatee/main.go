@@ -150,21 +150,22 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		// Use HAProxy's live certificate metadata for expiry. Vault provides the
 		// replacement payload and serial used to detect a newer issued certificate.
 		shouldUpdate, reason, isExpiring, err := shouldUpdateCertificate(domain, vaultClient, haproxyCert, cfg.Certificatee.RenewBeforeDays)
+
+		// Track expiring certificates even when Vault replacement material is invalid.
+		if isExpiring {
+			expiringCount++
+		}
+
 		if err != nil {
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
 			continue
 		}
 
-		// Track expiring certificates
-		if isExpiring {
-			expiringCount++
-		}
-
 		if shouldUpdate {
 			logger.Infof("[%s] Certificate %s needs update: %s", endpoint, displayName, reason)
 
-			if err := updateCertificate(apiName, domain, vaultClient, haproxyClient); err != nil {
+			if err := updateCertificate(apiName, domain, vaultClient, haproxyClient, haproxyCert); err != nil {
 				errs = append(errs, err)
 				logger.Errorf("[%s] %v", endpoint, err)
 				certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
@@ -195,17 +196,21 @@ func setDataPlaneAPIVersion(endpoint, version string) {
 
 func shouldUpdateCertificate(domain string, vaultClient *vault.VaultClient, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
 	shouldUpdate, reason, isExpiring, err = shouldUpdateForLiveExpiry(domain, haproxyCert, renewBeforeDays)
-	if err != nil || shouldUpdate {
+	if err != nil {
 		return shouldUpdate, reason, isExpiring, err
 	}
 
 	vaultCert, err := certificate.GetCertificate(domain, vaultClient)
 	if err != nil {
-		return false, "", false, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
+		return false, "", isExpiring, fmt.Errorf("failed to get certificate %s from vault: %w", domain, err)
 	}
 
-	if vaultCert == nil {
-		return false, "", false, fmt.Errorf("certificate for %s does not exist in vault", domain)
+	if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
+		return false, "", isExpiring, err
+	}
+
+	if shouldUpdate {
+		return true, reason, true, nil
 	}
 
 	shouldUpdate, reason = shouldUpdateForSerialMismatch(vaultCert, haproxyCert)
@@ -240,11 +245,52 @@ func shouldUpdateForSerialMismatch(vaultCert *x509.Certificate, haproxyCert *hap
 	return false, ""
 }
 
-func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client) error {
+func validateVaultCertificateForUpdate(domain string, vaultCert *x509.Certificate, haproxyCert *haproxy.CertificateDetail) error {
+	return validateVaultCertificateForUpdateAt(domain, vaultCert, haproxyCert, time.Now())
+}
+
+func validateVaultCertificateForUpdateAt(domain string, vaultCert *x509.Certificate, haproxyCert *haproxy.CertificateDetail, now time.Time) error {
+	if vaultCert == nil {
+		return fmt.Errorf("certificate for %s does not exist in vault", domain)
+	}
+
+	if vaultCert.IsCA {
+		return fmt.Errorf("refusing to update %s: Vault certificate bundle starts with a CA certificate", domain)
+	}
+
+	if certificate.IsExpired(vaultCert, now) {
+		return fmt.Errorf("refusing to update %s: Vault certificate expired on %s", domain, vaultCert.NotAfter.Format(time.RFC3339))
+	}
+
+	if haproxyCert != nil && !haproxyCert.NotAfter.IsZero() && vaultCert.NotAfter.Before(haproxyCert.NotAfter) {
+		return fmt.Errorf("refusing to update %s: Vault certificate expires on %s before live HAProxy certificate expires on %s", domain, vaultCert.NotAfter.Format(time.RFC3339), haproxyCert.NotAfter.Format(time.RFC3339))
+	}
+
+	return nil
+}
+
+func parseVaultLeafCertificate(secrets map[string]any) (*x509.Certificate, error) {
+	certPEM, ok := secrets["certificate"].(string)
+	if !ok || certPEM == "" {
+		return nil, fmt.Errorf("certificate not found in vault secrets")
+	}
+
+	return certificate.ParsePEMCertificate(certPEM)
+}
+
+func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, haproxyClient *haproxy.Client, haproxyCert *haproxy.CertificateDetail) error {
 	// Read certificate data from Vault
 	certificateSecrets, err := vaultClient.KVRead(certificate.VaultCertLocation(domain))
 	if err != nil {
 		return fmt.Errorf("failed to read certificate data from vault for %s: %w", domain, err)
+	}
+
+	vaultCert, err := parseVaultLeafCertificate(certificateSecrets)
+	if err != nil {
+		return fmt.Errorf("failed to parse Vault certificate for %s: %w", domain, err)
+	}
+	if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
+		return err
 	}
 
 	// Build PEM bundle (certificate + private key)
@@ -253,9 +299,13 @@ func updateCertificate(certPath, domain string, vaultClient *vault.VaultClient, 
 		return fmt.Errorf("failed to build PEM bundle for %s: %w", domain, err)
 	}
 
-	// Update certificate in HAProxy
+	storageCertName := haproxy.StorageCertificateName(certPath)
+	if err := haproxyClient.EnsureStorageCertificate(storageCertName, pemData); err != nil {
+		return fmt.Errorf("failed to persist certificate %s in HAProxy storage: %w", storageCertName, err)
+	}
+
 	if err := haproxyClient.UpdateCertificate(certPath, pemData); err != nil {
-		return fmt.Errorf("failed to update certificate %s in HAProxy: %w", certPath, err)
+		return fmt.Errorf("failed to update certificate %s in HAProxy runtime: %w", certPath, err)
 	}
 
 	return nil

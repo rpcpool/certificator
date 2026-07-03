@@ -49,6 +49,19 @@ func (cl *VaultClient) KVWrite(path string, value map[string]string) error {
 	return nil
 }
 
+// KVDelete deletes the latest value from vault key value storage.
+func (cl *VaultClient) KVDelete(path string) error {
+	fullPath := vaultFullPath(path, cl.kvPrefix)
+	cl.logger.Infof("deleting Vault path: %s", fullPath)
+	resp, err := cl.client.Logical().Delete(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed deleting KV value from Vault at path: %s, got: %v, error: %s",
+			fullPath, resp, err)
+	}
+
+	return nil
+}
+
 // KVRead reads data from vault key value storage
 func (cl *VaultClient) KVRead(path string) (map[string]interface{}, error) {
 	fullPath := vaultFullPath(path, cl.kvPrefix)

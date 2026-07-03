@@ -38,12 +38,12 @@ func ObtainCertificate(client *lego.Client, vault *vault.VaultClient, domains []
 		Domains: domains,
 		Bundle:  true,
 	}
-	certificate, err := client.Certificate.Obtain(request)
+	certResource, err := client.Certificate.Obtain(request)
 	if err != nil {
 		return err
 	}
 
-	return storeCertificateInVault(domains[0], certificate, vault)
+	return storeCertificateInVault(domains[0], certResource, vault)
 }
 
 // GetCertificate reads certificate from Vault KV store and parses it
@@ -53,14 +53,33 @@ func GetCertificate(domain string, vault *vault.VaultClient) (*x509.Certificate,
 		return nil, err
 	}
 	if cert, ok := secrets["certificate"].(string); ok {
-		parsedCert, err := certcrypto.ParsePEMBundle([]byte(cert))
-		if err != nil {
-			return nil, err
-		}
-		return parsedCert[0], nil
+		return ParsePEMCertificate(cert)
 	}
 
 	return nil, nil
+}
+
+// ParsePEMCertificate parses a PEM bundle and returns the first leaf certificate.
+func ParsePEMCertificate(certPEM string) (*x509.Certificate, error) {
+	parsedCerts, err := certcrypto.ParsePEMBundle([]byte(certPEM))
+	if err != nil {
+		return nil, err
+	}
+	if len(parsedCerts) == 0 {
+		return nil, fmt.Errorf("certificate bundle is empty")
+	}
+
+	return parsedCerts[0], nil
+}
+
+// DeleteCertificate removes certificate data from Vault KV storage.
+func DeleteCertificate(domain string, vault *vault.VaultClient) error {
+	return vault.KVDelete(VaultCertLocation(domain))
+}
+
+// IsExpired reports whether a certificate is already expired at now.
+func IsExpired(certificate *x509.Certificate, now time.Time) bool {
+	return certificate != nil && !certificate.NotAfter.After(now)
 }
 
 // NeedsReissuing checks if certificate domains and required domains match
