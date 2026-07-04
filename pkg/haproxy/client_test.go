@@ -580,13 +580,14 @@ func TestGetCertificateDetail(t *testing.T) {
 	mock.SetHandler("GET", "/v3/services/haproxy/runtime/ssl_certs/certs/example.com.pem", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"storage_name": "certs/example.com.pem",
-			"description":  "managed SSL file",
-			"domains":      "example.com",
-			"issuers":      "Example CA",
-			"not_after":    "2026-09-13T09:00:00.000Z",
-			"not_before":   "2025-09-13T09:00:00.000Z",
-			"serial":       "1f:52:02:e0",
+			"storage_name":              "certs/example.com.pem",
+			"description":               "managed SSL file",
+			"domains":                   "example.com",
+			"issuers":                   "Example CA",
+			"not_after":                 "2026-09-13T09:00:00.000Z",
+			"not_before":                "2025-09-13T09:00:00.000Z",
+			"serial":                    "1f:52:02:e0",
+			"subject_alternative_names": "DNS:example.com, DNS:www.example.com",
 		})
 	})
 
@@ -611,6 +612,9 @@ func TestGetCertificateDetail(t *testing.T) {
 	}
 	if detail.NotAfter.IsZero() {
 		t.Error("NotAfter should be parsed")
+	}
+	if detail.SubjectAlternativeNames != "DNS:example.com, DNS:www.example.com" {
+		t.Errorf("SubjectAlternativeNames = %q, want DNS:example.com, DNS:www.example.com", detail.SubjectAlternativeNames)
 	}
 }
 

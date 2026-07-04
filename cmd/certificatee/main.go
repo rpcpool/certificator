@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type certificateStore interface {
 }
 
 type certificateSyncResult struct {
+	domain         string
 	isExpiring     bool
 	storageSynced  bool
 	runtimeUpdated bool
@@ -141,26 +143,30 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		apiName := ref.APIName
 		logger.Infof("[%s] Checking certificate: %s", endpoint, displayName)
 
-		// Extract domain name from certificate path and normalize _.domain → *.domain for Vault
-		rawDomain := haproxy.ExtractDomainFromPath(displayName)
-		domain := haproxy.NormalizeDomainForVault(rawDomain)
-		logger.Debugf("[%s] Extracted domain '%s' from certificate '%s'", endpoint, domain, displayName)
+		fallbackDomain := domainFromCertificateName(displayName)
 
 		haproxyCert, err := haproxyClient.GetCertificateDetail(apiName)
 		if err != nil {
-			certmetrics.CertificateMetadataLookupFailures.WithLabelValues(endpoint, domain).Inc()
+			certmetrics.CertificateMetadataLookupFailures.WithLabelValues(endpoint, fallbackDomain).Inc()
 			errs = append(errs, err)
 			logger.Errorf("[%s] failed to get live dataplane metadata for %s: %v", endpoint, displayName, err)
 			continue
 		}
 
-		if haproxyCert != nil && !haproxyCert.NotAfter.IsZero() {
-			certmetrics.CertificateNotAfterTimestamp.WithLabelValues(endpoint, domain).Set(float64(haproxyCert.NotAfter.Unix()))
-		}
+		candidateDomains := domainsForVault(displayName, haproxyCert)
+		logger.Debugf("[%s] Candidate Vault domains for certificate '%s': %s", endpoint, displayName, strings.Join(candidateDomains, ", "))
 
 		// Use HAProxy's live certificate metadata for expiry. Vault provides the
 		// replacement payload persisted to storage and, when needed, runtime.
-		syncResult, err := syncCertificate(apiName, domain, vaultClient, haproxyClient, haproxyCert, cfg.Certificatee.RenewBeforeDays)
+		syncResult, err := syncCertificate(apiName, candidateDomains, vaultClient, haproxyClient, haproxyCert, cfg.Certificatee.RenewBeforeDays)
+		domain := syncResult.domain
+		if domain == "" {
+			domain = fallbackDomain
+		}
+
+		if haproxyCert != nil && !haproxyCert.NotAfter.IsZero() {
+			certmetrics.CertificateNotAfterTimestamp.WithLabelValues(endpoint, domain).Set(float64(haproxyCert.NotAfter.Unix()))
+		}
 
 		// Track expiring certificates even when Vault replacement material is invalid.
 		if syncResult.isExpiring {
@@ -201,6 +207,72 @@ func setDataPlaneAPIVersion(endpoint, version string) {
 		}
 		certmetrics.DataPlaneAPIVersion.WithLabelValues(endpoint, candidate).Set(value)
 	}
+}
+
+func domainFromCertificateName(displayName string) string {
+	rawDomain := haproxy.ExtractDomainFromPath(displayName)
+	return haproxy.NormalizeDomainForVault(rawDomain)
+}
+
+func domainsForVault(displayName string, haproxyCert *haproxy.CertificateDetail) []string {
+	seen := make(map[string]struct{})
+	domains := make([]string, 0, 1)
+	candidates := append(certificateDomains(haproxyCert), domainFromCertificateName(displayName))
+
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+
+		seen[candidate] = struct{}{}
+		domains = append(domains, candidate)
+	}
+
+	return domains
+}
+
+func certificateDomains(haproxyCert *haproxy.CertificateDetail) []string {
+	if haproxyCert == nil {
+		return nil
+	}
+
+	return parseCertificateDomainList(haproxyCert.Domains, haproxyCert.SubjectAlternativeNames)
+}
+
+func parseCertificateDomainList(values ...string) []string {
+	seen := make(map[string]struct{})
+	var domains []string
+
+	for _, value := range values {
+		for _, candidate := range strings.Split(value, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+
+			if strings.HasPrefix(candidate, "DNS:") || strings.HasPrefix(candidate, "dns:") {
+				candidate = strings.TrimSpace(candidate[4:])
+			} else if strings.Contains(candidate, ":") {
+				continue
+			}
+
+			if candidate == "" {
+				continue
+			}
+			if _, ok := seen[candidate]; ok {
+				continue
+			}
+
+			seen[candidate] = struct{}{}
+			domains = append(domains, candidate)
+		}
+	}
+
+	return domains
 }
 
 func shouldUpdateForLiveExpiry(domain string, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (shouldUpdate bool, reason string, isExpiring bool, err error) {
@@ -248,11 +320,42 @@ func validateVaultCertificateForUpdateAt(domain string, vaultCert *x509.Certific
 		return fmt.Errorf("refusing to update %s: Vault certificate expired on %s", domain, vaultCert.NotAfter.Format(time.RFC3339))
 	}
 
+	expectedDomains := expectedVaultCertificateDomains(domain, haproxyCert)
+	if !vaultCertificateMatchesDomains(vaultCert, expectedDomains) {
+		return fmt.Errorf("refusing to update %s: Vault certificate DNS names %v do not match live HAProxy DNS names %v", domain, vaultCert.DNSNames, expectedDomains)
+	}
+
 	if haproxyCert != nil && !haproxyCert.NotAfter.IsZero() && vaultCert.NotAfter.Before(haproxyCert.NotAfter) {
 		return fmt.Errorf("refusing to update %s: Vault certificate expires on %s before live HAProxy certificate expires on %s", domain, vaultCert.NotAfter.Format(time.RFC3339), haproxyCert.NotAfter.Format(time.RFC3339))
 	}
 
 	return nil
+}
+
+func expectedVaultCertificateDomains(domain string, haproxyCert *haproxy.CertificateDetail) []string {
+	domains := certificateDomains(haproxyCert)
+	if len(domains) > 0 {
+		return domains
+	}
+
+	if domain == "" {
+		return nil
+	}
+
+	return []string{domain}
+}
+
+func vaultCertificateMatchesDomains(vaultCert *x509.Certificate, domains []string) bool {
+	if vaultCert == nil || len(vaultCert.DNSNames) != len(domains) {
+		return false
+	}
+
+	vaultDomains := append([]string(nil), vaultCert.DNSNames...)
+	expectedDomains := append([]string(nil), domains...)
+	slices.Sort(vaultDomains)
+	slices.Sort(expectedDomains)
+
+	return slices.Equal(vaultDomains, expectedDomains)
 }
 
 func parseVaultLeafCertificate(secrets map[string]any) (*x509.Certificate, error) {
@@ -278,23 +381,53 @@ func readVaultCertificateBundle(domain string, vaultClient certificateStore) (ma
 	return certificateSecrets, vaultCert, nil
 }
 
-func syncCertificate(certPath, domain string, vaultClient certificateStore, haproxyClient *haproxy.Client, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (certificateSyncResult, error) {
-	result := certificateSyncResult{}
+func readValidVaultCertificateBundle(domains []string, vaultClient certificateStore, haproxyCert *haproxy.CertificateDetail) (string, map[string]any, *x509.Certificate, error) {
+	var errs []error
 
-	shouldUpdateRuntime, reason, isExpiring, err := shouldUpdateForLiveExpiry(domain, haproxyCert, renewBeforeDays)
+	for _, domain := range domains {
+		certificateSecrets, vaultCert, err := readVaultCertificateBundle(domain, vaultClient)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		return domain, certificateSecrets, vaultCert, nil
+	}
+
+	if len(domains) == 0 {
+		return "", nil, nil, fmt.Errorf("no Vault certificate candidates found")
+	}
+
+	return "", nil, nil, fmt.Errorf("no usable Vault certificate found for candidates %s: %w", strings.Join(domains, ", "), errors.Join(errs...))
+}
+
+func firstDomain(domains []string) string {
+	if len(domains) == 0 {
+		return ""
+	}
+
+	return domains[0]
+}
+
+func syncCertificate(certPath string, domains []string, vaultClient certificateStore, haproxyClient *haproxy.Client, haproxyCert *haproxy.CertificateDetail, renewBeforeDays int) (certificateSyncResult, error) {
+	result := certificateSyncResult{domain: firstDomain(domains)}
+
+	shouldUpdateRuntime, reason, isExpiring, err := shouldUpdateForLiveExpiry(result.domain, haproxyCert, renewBeforeDays)
 	result.isExpiring = isExpiring
 	if err != nil {
 		return result, err
 	}
 
-	certificateSecrets, vaultCert, err := readVaultCertificateBundle(domain, vaultClient)
+	domain, certificateSecrets, vaultCert, err := readValidVaultCertificateBundle(domains, vaultClient, haproxyCert)
 	if err != nil {
 		return result, err
 	}
-
-	if err := validateVaultCertificateForUpdate(domain, vaultCert, haproxyCert); err != nil {
-		return result, err
-	}
+	result.domain = domain
 
 	pemData, err := buildPEMBundle(certificateSecrets)
 	if err != nil {

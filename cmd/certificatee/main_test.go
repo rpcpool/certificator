@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -22,13 +23,21 @@ import (
 )
 
 type fakeCertificateStore struct {
-	secrets map[string]any
-	err     error
+	secrets       map[string]any
+	secretsByPath map[string]map[string]any
+	err           error
+	paths         *[]string
 }
 
-func (f fakeCertificateStore) KVRead(string) (map[string]any, error) {
+func (f fakeCertificateStore) KVRead(path string) (map[string]any, error) {
+	if f.paths != nil {
+		*f.paths = append(*f.paths, path)
+	}
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.secretsByPath != nil {
+		return f.secretsByPath[path], nil
 	}
 
 	return f.secrets, nil
@@ -36,6 +45,12 @@ func (f fakeCertificateStore) KVRead(string) (map[string]any, error) {
 
 func testCertificateBundle(t *testing.T, serial int64, notAfter time.Time) (string, string, *x509.Certificate) {
 	t.Helper()
+	return testCertificateBundleForDomain(t, "*.mainnet.rpcpool.com", serial, notAfter)
+}
+
+func testCertificateBundleForDomain(t *testing.T, domain string, serial int64, notAfter time.Time, additionalDomains ...string) (string, string, *x509.Certificate) {
+	t.Helper()
+	dnsNames := append([]string{domain}, additionalDomains...)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -44,8 +59,8 @@ func testCertificateBundle(t *testing.T, serial int64, notAfter time.Time) (stri
 
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(serial),
-		Subject:      pkix.Name{CommonName: "*.mainnet.rpcpool.com"},
-		DNSNames:     []string{"*.mainnet.rpcpool.com"},
+		Subject:      pkix.Name{CommonName: domain},
+		DNSNames:     dnsNames,
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -126,6 +141,7 @@ func TestValidateVaultCertificateForUpdate(t *testing.T) {
 
 	t.Run("rejects expired vault certificate", func(t *testing.T) {
 		vaultCert := &x509.Certificate{
+			DNSNames: []string{"example.com"},
 			NotAfter: now.Add(-time.Minute),
 		}
 
@@ -135,12 +151,30 @@ func TestValidateVaultCertificateForUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects SAN mismatch", func(t *testing.T) {
+		vaultCert := &x509.Certificate{
+			DNSNames: []string{"example.com"},
+			NotAfter: now.AddDate(0, 0, 90),
+		}
+		liveCert := &haproxy.CertificateDetail{
+			NotAfter:                now.AddDate(0, 0, 60),
+			SubjectAlternativeNames: "DNS:example.com, DNS:www.example.com",
+		}
+
+		err := validateVaultCertificateForUpdateAt("example.com", vaultCert, liveCert, now)
+		if err == nil || !strings.Contains(err.Error(), "do not match live HAProxy DNS names") {
+			t.Fatalf("expected SAN mismatch rejection, got %v", err)
+		}
+	})
+
 	t.Run("rejects certificate expiry downgrade", func(t *testing.T) {
 		vaultCert := &x509.Certificate{
+			DNSNames: []string{"example.com"},
 			NotAfter: now.AddDate(0, 0, 30),
 		}
 		liveCert := &haproxy.CertificateDetail{
-			NotAfter: now.AddDate(0, 0, 60),
+			NotAfter:                now.AddDate(0, 0, 60),
+			SubjectAlternativeNames: "DNS:example.com",
 		}
 
 		err := validateVaultCertificateForUpdateAt("example.com", vaultCert, liveCert, now)
@@ -149,16 +183,38 @@ func TestValidateVaultCertificateForUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("accepts valid non-downgrade vault certificate", func(t *testing.T) {
+	t.Run("accepts valid multi-SAN match in any order", func(t *testing.T) {
 		vaultCert := &x509.Certificate{
+			DNSNames: []string{"www.example.com", "example.com"},
 			NotAfter: now.AddDate(0, 0, 90),
 		}
 		liveCert := &haproxy.CertificateDetail{
-			NotAfter: now.AddDate(0, 0, 60),
+			NotAfter:                now.AddDate(0, 0, 60),
+			SubjectAlternativeNames: "DNS:example.com, DNS:www.example.com",
 		}
 
 		if err := validateVaultCertificateForUpdateAt("example.com", vaultCert, liveCert, now); err != nil {
 			t.Fatalf("validateVaultCertificateForUpdateAt() error = %v, want nil", err)
+		}
+	})
+}
+
+func TestDomainsForVaultUsesFilenameAndCertificateSANs(t *testing.T) {
+	t.Run("uses SAN candidates first and filename fallback", func(t *testing.T) {
+		domains := domainsForVault("api.mainnet-beta.solana.com.pem", &haproxy.CertificateDetail{
+			SubjectAlternativeNames: "DNS:other.example.com, DNS:api.mainnet-beta.solana.com",
+		})
+		want := []string{"other.example.com", "api.mainnet-beta.solana.com"}
+		if strings.Join(domains, "|") != strings.Join(want, "|") {
+			t.Fatalf("domainsForVault() = %v, want %v", domains, want)
+		}
+	})
+
+	t.Run("falls back to filename", func(t *testing.T) {
+		domains := domainsForVault("_.nodes.rpcpool.com.pem", &haproxy.CertificateDetail{})
+		want := []string{"*.nodes.rpcpool.com"}
+		if strings.Join(domains, "|") != strings.Join(want, "|") {
+			t.Fatalf("domainsForVault() = %v, want %v", domains, want)
 		}
 	})
 }
@@ -304,7 +360,7 @@ func TestSyncCertificatePersistsStorageWhenRuntimeCurrent(t *testing.T) {
 
 	result, err := syncCertificate(
 		"certs/_.mainnet.rpcpool.com.pem",
-		"*.mainnet.rpcpool.com",
+		[]string{"*.mainnet.rpcpool.com"},
 		fakeCertificateStore{secrets: map[string]any{"certificate": certPEM, "private_key": keyPEM}},
 		haproxyClient,
 		&haproxy.CertificateDetail{Serial: cert.SerialNumber.Text(16), NotAfter: cert.NotAfter},
@@ -362,7 +418,7 @@ func TestSyncCertificateUpdatesRuntimeAfterStorageOnSerialMismatch(t *testing.T)
 
 	result, err := syncCertificate(
 		"certs/_.mainnet.rpcpool.com.pem",
-		"*.mainnet.rpcpool.com",
+		[]string{"*.mainnet.rpcpool.com"},
 		fakeCertificateStore{secrets: map[string]any{"certificate": certPEM, "private_key": keyPEM}},
 		haproxyClient,
 		&haproxy.CertificateDetail{Serial: "aa:bb", NotAfter: cert.NotAfter.Add(-time.Hour)},
@@ -391,4 +447,89 @@ func readRequestBody(t *testing.T, r *http.Request) string {
 	}
 
 	return string(body)
+}
+
+func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	singleSANCertPEM, singleSANKeyPEM, _ := testCertificateBundleForDomain(t, "nodes.rpcpool.com", 0x16d8b4e9, time.Now().AddDate(0, 0, 90))
+	certPEM, keyPEM, cert := testCertificateBundleForDomain(t, "*.nodes.rpcpool.com", 0x26d8b4e9, time.Now().AddDate(0, 0, 90), "nodes.rpcpool.com")
+	liveNotAfter := time.Now().AddDate(0, 0, 60).UTC().Format(time.RFC3339Nano)
+	var vaultPaths []string
+	var storageWrites []string
+	var runtimeWrites []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"description":"__nodes_rpcpool_com.pem","storage_name":"certs/__nodes_rpcpool_com.pem"}]`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"storage_name":"certs/__nodes_rpcpool_com.pem",
+				"not_after":%q,
+				"not_before":"2026-05-08T00:00:00.000Z",
+				"serial":"aa:bb",
+				"subject_alternative_names":"DNS:nodes.rpcpool.com, DNS:*.nodes.rpcpool.com"
+			}`, liveNotAfter)))
+		case r.Method == http.MethodPut && r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates/__nodes_rpcpool_com.pem":
+			storageWrites = append(storageWrites, r.URL.Path)
+			if got := r.URL.Query().Get("skip_reload"); got != "true" {
+				t.Fatalf("skip_reload = %q, want true", got)
+			}
+			body := readRequestBody(t, r)
+			if !strings.Contains(body, certPEM) || !strings.Contains(body, keyPEM) {
+				t.Fatal("storage body did not contain certificate and private key")
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
+			runtimeWrites = append(runtimeWrites, r.URL.EscapedPath())
+			if !strings.Contains(r.URL.EscapedPath(), "certs%2F__nodes_rpcpool_com.pem") {
+				t.Fatalf("runtime path = %q, want existing sanitized certificate name", r.URL.EscapedPath())
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected %s %q", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
+	err = processHAProxyEndpoint(
+		logger,
+		config.Config{Certificatee: config.Certificatee{RenewBeforeDays: 30}},
+		fakeCertificateStore{
+			secretsByPath: map[string]map[string]any{
+				"certificates/nodes.rpcpool.com":   {"certificate": singleSANCertPEM, "private_key": singleSANKeyPEM},
+				"certificates/*.nodes.rpcpool.com": {"certificate": certPEM, "private_key": keyPEM},
+			},
+			paths: &vaultPaths,
+		},
+		haproxyClient,
+		healthChecker,
+	)
+	if err != nil {
+		t.Fatalf("processHAProxyEndpoint() error = %v", err)
+	}
+
+	wantVaultPaths := []string{"certificates/nodes.rpcpool.com", "certificates/*.nodes.rpcpool.com"}
+	if strings.Join(vaultPaths, "|") != strings.Join(wantVaultPaths, "|") {
+		t.Fatalf("vaultPaths = %v, want %v", vaultPaths, wantVaultPaths)
+	}
+	if len(storageWrites) != 1 {
+		t.Fatalf("storageWrites = %v, want one write", storageWrites)
+	}
+	if len(runtimeWrites) != 1 {
+		t.Fatalf("runtimeWrites = %v, want one write", runtimeWrites)
+	}
+	if got := cert.SerialNumber.Text(16); got == "aabb" {
+		t.Fatal("test certificate serial unexpectedly matches live serial")
+	}
 }
