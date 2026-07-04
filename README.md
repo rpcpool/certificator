@@ -138,9 +138,14 @@ Or use [direnv](https://direnv.net/) for automatic shell activation.
 go test ./...
 ```
 
-### Release Builds
+You can also just go build stuff without Nix.
 
-Release binaries are built by [`rpcpool/Binaries-ci`](https://github.com/rpcpool/Binaries-ci). The tag workflow in this repository dispatches `build-release.yml` in Binaries-ci; this repository does not publish release artifacts directly. CI still runs `nix develop --command build` as a compile check.
+### Building
+
+```bash
+go build ./cmd/certificatee
+go build ./cmd/certificator
+```
 
 ## Architecture
 
