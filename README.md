@@ -87,34 +87,38 @@ Certificate files must be named after the domain (e.g., `/etc/haproxy/certs/exam
 
 ## Metrics
 
-Certificatee exposes Prometheus metrics for monitoring:
+Certificator and certificatee expose Prometheus metrics for monitoring:
 
-- `GET /metrics` exposes Prometheus metrics.
-- `GET /health` returns `200 OK` when the process can still reach Vault and at least one HAProxy Data Plane API endpoint has completed a recent v3 runtime certificate sync probe. Non-v3 endpoints are skipped and reported via metrics and logs.
+- `GET /metrics` exposes Prometheus metrics when `METRICS_LISTEN_ADDRESS` is set.
+- `GET /health` returns `200 OK` when the process health check passes. For certificatee, health requires Vault reachability and at least one recent successful HAProxy Data Plane API v3 runtime certificate sync probe. Non-v3 endpoints are skipped and reported via metrics and logs.
 
-### General Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `up` | Gauge | service, version, hostname, environment | Indicates if the service is running (1=up, 0=down) |
-| `certificatee_certificates_updated_on_disk_total` | Gauge | domain | Certificates updated successfully |
-| `certificatee_certificates_update_failures_total` | Counter | domain | Certificate update failures |
-
-### HAProxy-Specific Metrics
+### Shared Metrics
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `certificatee_dataplaneapi_version` | Gauge | endpoint, version | Detected HAProxy Data Plane API version for certificatee endpoints. `version` is `v2` or `v3`; the detected version is set to 1 and the other version is set to 0 |
-| `certificatee_certificate_not_after_timestamp_seconds` | Gauge | endpoint, domain | Live certificate expiry reported by the HAProxy Data Plane API runtime endpoint |
-| `certificatee_certificate_metadata_lookup_failures_total` | Counter | endpoint, domain | Per-certificate DPAPI runtime metadata lookups that failed |
-| `certificatee_haproxy_connections_total` | Counter | endpoint, status | Total connection attempts (status: success/failure) |
-| `certificatee_haproxy_connection_retries_total` | Counter | endpoint | Connection retry attempts |
-| `certificatee_haproxy_certificates_checked_total` | Counter | endpoint | Certificates checked per endpoint |
-| `certificatee_haproxy_certificates_updated_total` | Counter | endpoint, domain | Certificates updated per endpoint/domain |
-| `certificatee_haproxy_last_check_timestamp_seconds` | Gauge | endpoint | Unix timestamp of last successful check |
-| `certificatee_haproxy_command_duration_seconds` | Histogram | endpoint, command | Duration of HAProxy Data Plane API requests |
+| `up` | Gauge | `service`, `version`, `hostname`, `environment` | Indicates if the service is running (`1` = up, `0` = down) |
 
-Not an exhaustive list; refer to the source code for all metrics.
+### Certificator Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `certificator_certificates_renewed_total` | Counter | `domain` | Certificates renewed successfully |
+| `certificator_certificates_renewal_failures_total` | Counter | `domain` | Certificate renewal failures |
+| `certificator_certificates_checked_total` | Counter | `domain`, `status` | Certificate checks by result status |
+
+### Certificatee Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `certificatee_certificates_updated_total` | Counter | `endpoint`, `domain` | Certificates updated successfully in HAProxy |
+| `certificatee_certificates_update_failures_total` | Counter | `endpoint`, `domain` | Certificate update failures |
+| `certificatee_certificates_expiring` | Gauge | `endpoint` | Number of certificates expiring within the renewal threshold |
+| `certificatee_certificates_total` | Gauge | `endpoint` | Total number of certificates managed per endpoint |
+| `certificatee_certificates_wildcard_total` | Gauge | `endpoint` | Number of certificates with wildcard storage filenames |
+| `certificatee_certificate_not_after_timestamp_seconds` | Gauge | `endpoint`, `domain` | Live certificate expiry reported by the HAProxy Data Plane API runtime endpoint |
+| `certificatee_certificate_metadata_lookup_failures_total` | Counter | `endpoint`, `domain` | Per-certificate Data Plane API runtime metadata lookups that failed |
+| `certificatee_dataplaneapi_version` | Gauge | `endpoint`, `version` | Detected HAProxy Data Plane API version for certificatee endpoints (`1` = detected version) |
+| `certificatee_last_sync_timestamp_seconds` | Gauge | `endpoint` | Unix timestamp of the last successful endpoint sync |
 
 ## Development
 
@@ -128,13 +132,13 @@ nix develop
 
 Or use [direnv](https://direnv.net/) for automatic shell activation.
 
-You can also just go build stuff without Nix.
-
 ### Running Tests
 
 ```bash
 go test ./...
 ```
+
+You can also just go build stuff without Nix.
 
 ### Building
 
