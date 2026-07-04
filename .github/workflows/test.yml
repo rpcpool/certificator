@@ -66,3 +66,6 @@ jobs:
             ```
 
             </details>
+
+      - name: Build Binaries
+        run: nix develop --command build

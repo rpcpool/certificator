@@ -140,7 +140,7 @@ go test ./...
 
 ### Release Builds
 
-Release binaries are built by [`rpcpool/Binaries-ci`](https://github.com/rpcpool/Binaries-ci). The tag workflow in this repository dispatches `build-release.yml` in Binaries-ci; this repository does not build release artifacts directly.
+Release binaries are built by [`rpcpool/Binaries-ci`](https://github.com/rpcpool/Binaries-ci). The tag workflow in this repository dispatches `build-release.yml` in Binaries-ci; this repository does not publish release artifacts directly. CI still runs `nix develop --command build` as a compile check.
 
 ## Architecture
 
