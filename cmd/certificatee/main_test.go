@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -314,6 +315,72 @@ func TestProcessHAProxyEndpointMarksV3ReadyEndpoint(t *testing.T) {
 	}
 	if lastSync := healthChecker.lastSync(); lastSync.IsZero() {
 		t.Fatal("health last sync is zero, want successful sync timestamp")
+	}
+}
+
+func TestSyncCertificateSkipsNonExpiringUnusableVaultCandidate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected HAProxy request for skipped certificate: %s %s", r.Method, r.URL.String())
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	result, err := syncCertificate(
+		"certs/_.mainnet.rpcpool.com.pem",
+		[]string{"*.mainnet.rpcpool.com"},
+		fakeCertificateStore{},
+		haproxyClient,
+		&haproxy.CertificateDetail{NotAfter: time.Now().AddDate(0, 0, 60)},
+		30,
+	)
+	if err != nil {
+		t.Fatalf("syncCertificate() error = %v, want nil", err)
+	}
+	if result.skipReason == "" {
+		t.Fatal("skipReason is empty, want non-empty")
+	}
+	if result.storageSynced || result.runtimeUpdated {
+		t.Fatalf("storageSynced=%v runtimeUpdated=%v, want both false", result.storageSynced, result.runtimeUpdated)
+	}
+}
+
+func TestSyncCertificateErrorsWhenExpiringWithoutUsableVaultCandidate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected HAProxy request for failed certificate: %s %s", r.Method, r.URL.String())
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	result, err := syncCertificate(
+		"certs/_.mainnet.rpcpool.com.pem",
+		[]string{"*.mainnet.rpcpool.com"},
+		fakeCertificateStore{},
+		haproxyClient,
+		&haproxy.CertificateDetail{NotAfter: time.Now().AddDate(0, 0, 10)},
+		30,
+	)
+	if err == nil {
+		t.Fatal("syncCertificate() error = nil, want error")
+	}
+	if !errors.Is(err, errNoUsableVaultCertificate) {
+		t.Fatalf("syncCertificate() error = %v, want no usable Vault certificate", err)
+	}
+	if !result.isExpiring {
+		t.Fatal("isExpiring = false, want true")
 	}
 }
 
