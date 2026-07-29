@@ -534,13 +534,13 @@ func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"description":"__nodes_rpcpool_com.pem","storage_name":"certs/__nodes_rpcpool_com.pem"}]`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(fmt.Sprintf(`{
+			_, _ = fmt.Fprintf(w, `{
 				"storage_name":"certs/__nodes_rpcpool_com.pem",
 				"not_after":%q,
 				"not_before":"2026-05-08T00:00:00.000Z",
 				"serial":"aa:bb",
 				"subject_alternative_names":"DNS:nodes.rpcpool.com, DNS:*.nodes.rpcpool.com"
-			}`, liveNotAfter)))
+			}`, liveNotAfter)
 		case r.Method == http.MethodPut && r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates/__nodes_rpcpool_com.pem":
 			storageWrites = append(storageWrites, r.URL.Path)
 			if got := r.URL.Query().Get("skip_reload"); got != "true" {
