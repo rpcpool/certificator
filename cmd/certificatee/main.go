@@ -20,6 +20,8 @@ import (
 
 var (
 	version = "dev" // GoReleaser will inject the Git tag here
+
+	errNoUsableVaultCertificate = errors.New("no usable Vault certificate")
 )
 
 type certificateStore interface {
@@ -32,6 +34,20 @@ type certificateSyncResult struct {
 	storageSynced  bool
 	runtimeUpdated bool
 	reason         string
+	skipReason     string
+}
+
+type noUsableVaultCertificateError struct {
+	domains []string
+	cause   error
+}
+
+func (e *noUsableVaultCertificateError) Error() string {
+	return fmt.Sprintf("no usable Vault certificate found for candidates %s: %v", strings.Join(e.domains, ", "), e.cause)
+}
+
+func (e *noUsableVaultCertificateError) Unwrap() []error {
+	return []error{errNoUsableVaultCertificate, e.cause}
 }
 
 func main() {
@@ -137,6 +153,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 	var errs []error
 	var expiringCount int
+	var skippedVaultCount int
 
 	for _, ref := range certRefs {
 		displayName := ref.DisplayName
@@ -180,6 +197,12 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 			continue
 		}
 
+		if syncResult.skipReason != "" {
+			skippedVaultCount++
+			logger.Debugf("[%s] Skipping certificate %s: %s", endpoint, displayName, syncResult.skipReason)
+			continue
+		}
+
 		if syncResult.storageSynced {
 			logger.Infof("[%s] Certificate %s persisted to storage", endpoint, displayName)
 		}
@@ -195,6 +218,9 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 
 	// Record expiring certificates count
 	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
+	if skippedVaultCount > 0 {
+		logger.Infof("[%s] Skipped %d certificate(s) without usable Vault replacement material", endpoint, skippedVaultCount)
+	}
 
 	return errors.Join(errs...)
 }
@@ -403,7 +429,10 @@ func readValidVaultCertificateBundle(domains []string, vaultClient certificateSt
 		return "", nil, nil, fmt.Errorf("no Vault certificate candidates found")
 	}
 
-	return "", nil, nil, fmt.Errorf("no usable Vault certificate found for candidates %s: %w", strings.Join(domains, ", "), errors.Join(errs...))
+	return "", nil, nil, &noUsableVaultCertificateError{
+		domains: domains,
+		cause:   errors.Join(errs...),
+	}
 }
 
 func firstDomain(domains []string) string {
@@ -425,6 +454,10 @@ func syncCertificate(certPath string, domains []string, vaultClient certificateS
 
 	domain, certificateSecrets, vaultCert, err := readValidVaultCertificateBundle(domains, vaultClient, haproxyCert)
 	if err != nil {
+		if !isExpiring && errors.Is(err, errNoUsableVaultCertificate) {
+			result.skipReason = err.Error()
+			return result, nil
+		}
 		return result, err
 	}
 	result.domain = domain
