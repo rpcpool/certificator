@@ -805,10 +805,11 @@ func TestDeleteCertificate(t *testing.T) {
 	logger.SetLevel(logrus.PanicLevel)
 
 	tests := []struct {
-		name       string
-		certName   string
-		statusCode int
-		wantErr    bool
+		name           string
+		certName       string
+		statusCode     int
+		wantErr        bool
+		wantNotFoundOn bool
 	}{
 		{
 			name:       "success - no content",
@@ -817,16 +818,17 @@ func TestDeleteCertificate(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "success - OK",
+			name:       "success - accepted",
 			certName:   "example.com.pem",
-			statusCode: http.StatusOK,
+			statusCode: http.StatusAccepted,
 			wantErr:    false,
 		},
 		{
-			name:       "error - not found",
-			certName:   "notfound.pem",
-			statusCode: http.StatusNotFound,
-			wantErr:    true,
+			name:           "error - not found",
+			certName:       "notfound.pem",
+			statusCode:     http.StatusNotFound,
+			wantErr:        true,
+			wantNotFoundOn: true,
 		},
 		{
 			name:       "error - server error",
@@ -841,13 +843,12 @@ func TestDeleteCertificate(t *testing.T) {
 			mock := newMockDataPlaneAPI(t)
 			defer mock.Close()
 
-			mock.SetHandler("GET", "/v3/services/haproxy/configuration/version", func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte("42"))
-			})
-
 			mock.SetHandler("DELETE", "/v3/services/haproxy/storage/ssl_certificates/"+tt.certName, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Query().Get("version") != "42" {
-					t.Errorf("version query = %q, want %q", r.URL.Query().Get("version"), "42")
+				if got := r.URL.Query().Get("skip_reload"); got != "true" {
+					t.Errorf("skip_reload query = %q, want true", got)
+				}
+				if r.URL.Query().Has("version") {
+					t.Errorf("version query unexpectedly set to %q; endpoint does not accept it", r.URL.Query().Get("version"))
 				}
 				w.WriteHeader(tt.statusCode)
 			})
@@ -860,6 +861,9 @@ func TestDeleteCertificate(t *testing.T) {
 			err = client.DeleteCertificate(tt.certName)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DeleteCertificate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantNotFoundOn && !IsHTTPStatus(err, http.StatusNotFound) {
+				t.Errorf("IsHTTPStatus(err, 404) = false, want true for err = %v", err)
 			}
 		})
 	}

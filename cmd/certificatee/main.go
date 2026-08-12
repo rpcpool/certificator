@@ -37,6 +37,23 @@ type certificateSyncResult struct {
 	skipReason     string
 }
 
+// processedCertificateOutcome records what happened to one certificate ref
+// during this sync cycle, so a later pass can safely identify and remove
+// legacy duplicate certificate files sharing the same live SAN.
+type processedCertificateOutcome struct {
+	ref    haproxy.CertificateRef
+	domain string
+	san    []string
+	err    error
+	result certificateSyncResult
+}
+
+// isStable reports whether this cycle's sync needed no corrective action for
+// this certificate: no error, nothing skipped, and no fresh runtime push.
+func (o processedCertificateOutcome) isStable() bool {
+	return o.err == nil && o.result.skipReason == "" && !o.result.runtimeUpdated
+}
+
 type noUsableVaultCertificateError struct {
 	domains []string
 	cause   error
@@ -154,6 +171,7 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	var errs []error
 	var expiringCount int
 	var skippedVaultCount int
+	var processed []processedCertificateOutcome
 
 	for _, ref := range certRefs {
 		displayName := ref.DisplayName
@@ -168,6 +186,23 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 			errs = append(errs, err)
 			logger.Errorf("[%s] failed to get live dataplane metadata for %s: %v", endpoint, displayName, err)
 			continue
+		}
+
+		// record captures this ref's outcome for the legacy-duplicate cleanup
+		// pass below. It must run on every exit path once haproxyCert is known,
+		// since duplicates can land in any of the branches below.
+		record := func(err error, result certificateSyncResult) {
+			domain := result.domain
+			if domain == "" {
+				domain = fallbackDomain
+			}
+			processed = append(processed, processedCertificateOutcome{
+				ref:    ref,
+				domain: domain,
+				san:    certificateDomains(haproxyCert),
+				err:    err,
+				result: result,
+			})
 		}
 
 		candidateDomains := domainsForVault(displayName, haproxyCert)
@@ -194,12 +229,14 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 			errs = append(errs, err)
 			logger.Errorf("[%s] %v", endpoint, err)
 			certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+			record(err, syncResult)
 			continue
 		}
 
 		if syncResult.skipReason != "" {
 			skippedVaultCount++
 			logger.Debugf("[%s] Skipping certificate %s: %s", endpoint, displayName, syncResult.skipReason)
+			record(nil, syncResult)
 			continue
 		}
 
@@ -210,11 +247,15 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		if syncResult.runtimeUpdated {
 			certmetrics.CertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
 			logger.Infof("[%s] Certificate %s updated successfully: %s", endpoint, displayName, syncResult.reason)
+			record(nil, syncResult)
 			continue
 		}
 
 		logger.Infof("[%s] Certificate %s is up to date", endpoint, displayName)
+		record(nil, syncResult)
 	}
+
+	cleanupLegacyDuplicateCertificates(logger, endpoint, haproxyClient, processed)
 
 	// Record expiring certificates count
 	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
@@ -223,6 +264,86 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 	}
 
 	return errors.Join(errs...)
+}
+
+// isLegacyCertificateName reports whether displayName uses the pre-migration
+// naming convention, where every "." in the domain (including the leading
+// wildcard "*.") was sanitized to "_" (e.g. "__devnet_rpcpool_com.pem" or
+// "api_mainnet-beta_solana_com.pem"). The current convention only sanitizes
+// the leading "*." to "_." and otherwise keeps the domain's dots literal
+// (e.g. "_.devnet.rpcpool.com.pem"), so a real domain name with zero dots
+// after stripping the extension can only be the legacy encoding.
+func isLegacyCertificateName(displayName string) bool {
+	return !strings.Contains(haproxy.ExtractDomainFromPath(displayName), ".")
+}
+
+// cleanupLegacyDuplicateCertificates removes certificate files left behind by
+// the pre-migration naming convention once we're sure it's safe: HAProxy is
+// still carrying both the legacy file and its modern replacement for the
+// exact same live SAN, and the replacement synced cleanly this cycle with no
+// error, no skip, and no fresh runtime push. Deletion only ever targets the
+// storage layer with skip_reload=true, so it never forces an HAProxy reload.
+// Cleanup failures are logged and metered, never treated as sync failures:
+// this is best-effort housekeeping, not certificate delivery.
+func cleanupLegacyDuplicateCertificates(logger *logrus.Logger, endpoint string, haproxyClient *haproxy.Client, processed []processedCertificateOutcome) {
+	groups := make(map[string][]processedCertificateOutcome)
+	for _, outcome := range processed {
+		if len(outcome.san) == 0 {
+			continue
+		}
+		key := strings.Join(outcome.san, ",")
+		groups[key] = append(groups[key], outcome)
+	}
+
+	for san, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+
+		var keeper *processedCertificateOutcome
+		var legacy []processedCertificateOutcome
+		ambiguous := false
+
+		for i := range group {
+			outcome := group[i]
+			if isLegacyCertificateName(outcome.ref.DisplayName) {
+				legacy = append(legacy, outcome)
+				continue
+			}
+			if keeper != nil {
+				ambiguous = true
+				continue
+			}
+			keeper = &group[i]
+		}
+
+		if ambiguous || keeper == nil || len(legacy) == 0 {
+			logger.Warnf("[%s] %d certificate(s) share SAN %q but do not resolve to exactly one current-format certificate and one or more legacy duplicates; skipping cleanup", endpoint, len(group), san)
+			continue
+		}
+
+		if !keeper.isStable() {
+			// The certificate we'd keep wasn't confirmed healthy this cycle
+			// (error, skip, or a runtime push just happened) - leave the
+			// legacy duplicate alone and re-evaluate next cycle.
+			continue
+		}
+
+		for _, dup := range legacy {
+			storageCertName := haproxy.StorageCertificateName(dup.ref.APIName)
+			if err := haproxyClient.DeleteCertificate(storageCertName); err != nil {
+				if haproxy.IsHTTPStatus(err, http.StatusNotFound) {
+					continue
+				}
+				certmetrics.LegacyCertificatesRemovalFailures.WithLabelValues(endpoint, keeper.domain).Inc()
+				logger.Warnf("[%s] failed to remove legacy duplicate certificate %s: %v", endpoint, dup.ref.DisplayName, err)
+				continue
+			}
+
+			certmetrics.LegacyCertificatesRemoved.WithLabelValues(endpoint, keeper.domain).Inc()
+			logger.Infof("[%s] Removed legacy duplicate certificate %s (superseded by %s)", endpoint, dup.ref.DisplayName, keeper.ref.DisplayName)
+		}
+	}
 }
 
 func setDataPlaneAPIVersion(endpoint, version string) {
