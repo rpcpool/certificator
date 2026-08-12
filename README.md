@@ -117,6 +117,8 @@ Certificator and certificatee expose Prometheus metrics for monitoring:
 | `certificatee_certificates_wildcard_total` | Gauge | `endpoint` | Number of certificates with wildcard storage filenames |
 | `certificatee_certificate_not_after_timestamp_seconds` | Gauge | `endpoint`, `domain` | Live certificate expiry reported by the HAProxy Data Plane API runtime endpoint |
 | `certificatee_certificate_metadata_lookup_failures_total` | Counter | `endpoint`, `domain` | Per-certificate Data Plane API runtime metadata lookups that failed |
+| `certificatee_legacy_certificates_removed_total` | Counter | `endpoint`, `domain` | Legacy duplicate certificate files removed from HAProxy storage |
+| `certificatee_legacy_certificates_removal_failures_total` | Counter | `endpoint`, `domain` | Failed attempts to remove a legacy duplicate certificate file |
 | `certificatee_dataplaneapi_version` | Gauge | `endpoint`, `version` | Detected HAProxy Data Plane API version for certificatee endpoints (`1` = detected version) |
 | `certificatee_last_sync_timestamp_seconds` | Gauge | `endpoint` | Unix timestamp of the last successful endpoint sync |
 

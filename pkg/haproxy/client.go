@@ -170,31 +170,6 @@ func parseAPITime(value string) (time.Time, error) {
 	return time.Parse(time.RFC3339, value)
 }
 
-func (c *Client) getConfigVersion() (string, error) {
-	resp, err := c.doRequest("GET", "/v3/services/haproxy/configuration/version", nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", errors.Errorf("failed to get configuration version: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to read configuration version")
-	}
-
-	version := strings.TrimSpace(string(body))
-	if version == "" {
-		return "", errors.New("empty configuration version response")
-	}
-
-	return version, nil
-}
-
 // SSLCertificateEntry represents an SSL certificate entry from the Data Plane API.
 type SSLCertificateEntry struct {
 	File        string `json:"file"`
@@ -440,26 +415,24 @@ func (c *Client) EnsureStorageCertificate(certName, pemData string) error {
 	return nil
 }
 
-// DeleteCertificate deletes a certificate entry via Data Plane API
+// DeleteCertificate removes a certificate file from HAProxy storage without
+// asking Data Plane API to reload HAProxy. The Data Plane API does not accept
+// a version parameter for this endpoint, unlike the configuration-changing
+// storage write endpoints.
 func (c *Client) DeleteCertificate(certName string) error {
-	version, err := c.getConfigVersion()
-	if err != nil {
-		return err
-	}
-
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?version=%s", url.PathEscape(certName), url.QueryEscape(version))
+	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?skip_reload=true", url.PathEscape(certName))
 	resp, err := c.doRequest("DELETE", path, nil, "")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return errors.Errorf("failed to delete certificate %s: status %d, body: %s", certName, resp.StatusCode, string(body))
+		return unexpectedStatusError(fmt.Sprintf("failed to delete certificate %s", certName), resp.StatusCode, body)
 	}
 
-	c.logger.Debugf("Deleted certificate %s", certName)
+	c.logger.Debugf("Deleted storage certificate %s", certName)
 	return nil
 }
 
