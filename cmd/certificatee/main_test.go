@@ -8,7 +8,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -346,8 +345,8 @@ func TestSyncCertificateSkipsNonExpiringUnusableVaultCandidate(t *testing.T) {
 	if result.skipReason == "" {
 		t.Fatal("skipReason is empty, want non-empty")
 	}
-	if result.storageSynced || result.runtimeUpdated {
-		t.Fatalf("storageSynced=%v runtimeUpdated=%v, want both false", result.storageSynced, result.runtimeUpdated)
+	if result.runtimeUpdated {
+		t.Fatalf("runtimeUpdated = %v, want false", result.runtimeUpdated)
 	}
 }
 
@@ -384,39 +383,16 @@ func TestSyncCertificateErrorsWhenExpiringWithoutUsableVaultCandidate(t *testing
 	}
 }
 
-func TestSyncCertificatePersistsStorageWhenRuntimeCurrent(t *testing.T) {
+func TestSyncCertificateNoOpWhenRuntimeCurrent(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
 	certPEM, keyPEM, cert := testCertificateBundle(t, 0x1f5202e0, time.Now().AddDate(0, 0, 90))
 
-	var storageWrites int
-	var runtimeWrites int
+	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates/_.mainnet.rpcpool.com.pem":
-			storageWrites++
-			if r.Method != http.MethodPut {
-				t.Fatalf("storage method = %s, want PUT", r.Method)
-			}
-			if got := r.URL.Query().Get("skip_reload"); got != "true" {
-				t.Fatalf("skip_reload = %q, want true", got)
-			}
-			if got := r.Header.Get("Content-Type"); got != "text/plain" {
-				t.Fatalf("storage content type = %q, want text/plain", got)
-			}
-
-			body := readRequestBody(t, r)
-			if !strings.Contains(body, certPEM) || !strings.Contains(body, keyPEM) {
-				t.Fatal("storage body did not contain certificate and private key")
-			}
-			w.WriteHeader(http.StatusOK)
-		case strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
-			runtimeWrites++
-			w.WriteHeader(http.StatusOK)
-		default:
-			t.Fatalf("unexpected path %q", r.URL.Path)
-		}
+		requests++
+		t.Fatalf("unexpected request %s %q, want no HAProxy calls when the runtime certificate is already current", r.Method, r.URL.String())
 	}))
 	defer server.Close()
 
@@ -436,33 +412,23 @@ func TestSyncCertificatePersistsStorageWhenRuntimeCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("syncCertificate() error = %v", err)
 	}
-	if !result.storageSynced {
-		t.Fatal("storageSynced = false, want true")
-	}
 	if result.runtimeUpdated {
 		t.Fatal("runtimeUpdated = true, want false")
 	}
-	if storageWrites != 1 {
-		t.Fatalf("storageWrites = %d, want 1", storageWrites)
-	}
-	if runtimeWrites != 0 {
-		t.Fatalf("runtimeWrites = %d, want 0", runtimeWrites)
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 
-func TestSyncCertificateUpdatesRuntimeAfterStorageOnSerialMismatch(t *testing.T) {
+func TestSyncCertificateUpdatesRuntimeOnSerialMismatch(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 
 	certPEM, keyPEM, cert := testCertificateBundle(t, 0x1f5202e0, time.Now().AddDate(0, 0, 90))
 
-	var storageWrites int
 	var runtimeWrites int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates/_.mainnet.rpcpool.com.pem":
-			storageWrites++
-			w.WriteHeader(http.StatusOK)
 		case strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
 			runtimeWrites++
 			if r.Method != http.MethodPut {
@@ -494,26 +460,15 @@ func TestSyncCertificateUpdatesRuntimeAfterStorageOnSerialMismatch(t *testing.T)
 	if err != nil {
 		t.Fatalf("syncCertificate() error = %v", err)
 	}
-	if !result.storageSynced || !result.runtimeUpdated {
-		t.Fatalf("storageSynced=%v runtimeUpdated=%v, want both true", result.storageSynced, result.runtimeUpdated)
+	if !result.runtimeUpdated {
+		t.Fatal("runtimeUpdated = false, want true")
 	}
-	if storageWrites != 1 || runtimeWrites != 1 {
-		t.Fatalf("storageWrites=%d runtimeWrites=%d, want 1 each", storageWrites, runtimeWrites)
+	if runtimeWrites != 1 {
+		t.Fatalf("runtimeWrites = %d, want 1", runtimeWrites)
 	}
 	if !strings.Contains(result.reason, "serial mismatch") {
 		t.Fatalf("reason = %q, want serial mismatch", result.reason)
 	}
-}
-
-func readRequestBody(t *testing.T, r *http.Request) string {
-	t.Helper()
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-
-	return string(body)
 }
 
 func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
@@ -524,7 +479,6 @@ func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
 	certPEM, keyPEM, cert := testCertificateBundleForDomain(t, "*.nodes.rpcpool.com", 0x26d8b4e9, time.Now().AddDate(0, 0, 90), "nodes.rpcpool.com")
 	liveNotAfter := time.Now().AddDate(0, 0, 60).UTC().Format(time.RFC3339Nano)
 	var vaultPaths []string
-	var storageWrites []string
 	var runtimeWrites []string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -541,16 +495,6 @@ func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
 				"serial":"aa:bb",
 				"subject_alternative_names":"DNS:nodes.rpcpool.com, DNS:*.nodes.rpcpool.com"
 			}`, liveNotAfter)
-		case r.Method == http.MethodPut && r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates/__nodes_rpcpool_com.pem":
-			storageWrites = append(storageWrites, r.URL.Path)
-			if got := r.URL.Query().Get("skip_reload"); got != "true" {
-				t.Fatalf("skip_reload = %q, want true", got)
-			}
-			body := readRequestBody(t, r)
-			if !strings.Contains(body, certPEM) || !strings.Contains(body, keyPEM) {
-				t.Fatal("storage body did not contain certificate and private key")
-			}
-			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
 			runtimeWrites = append(runtimeWrites, r.URL.EscapedPath())
 			if !strings.Contains(r.URL.EscapedPath(), "certs%2F__nodes_rpcpool_com.pem") {
@@ -590,320 +534,10 @@ func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
 	if strings.Join(vaultPaths, "|") != strings.Join(wantVaultPaths, "|") {
 		t.Fatalf("vaultPaths = %v, want %v", vaultPaths, wantVaultPaths)
 	}
-	if len(storageWrites) != 1 {
-		t.Fatalf("storageWrites = %v, want one write", storageWrites)
-	}
 	if len(runtimeWrites) != 1 {
 		t.Fatalf("runtimeWrites = %v, want one write", runtimeWrites)
 	}
 	if got := cert.SerialNumber.Text(16); got == "aabb" {
 		t.Fatal("test certificate serial unexpectedly matches live serial")
 	}
-}
-
-func TestIsLegacyCertificateName(t *testing.T) {
-	tests := []struct {
-		name        string
-		displayName string
-		want        bool
-	}{
-		{"legacy wildcard", "__devnet_rpcpool_com.pem", true},
-		{"legacy non-wildcard", "api_mainnet-beta_solana_com.pem", true},
-		{"current wildcard", "_.devnet.rpcpool.com.pem", false},
-		{"current non-wildcard", "api.mainnet-beta.solana.com.pem", false},
-		{"current wildcard other extension", "_.devnet.rpcpool.com.crt", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isLegacyCertificateName(tt.displayName); got != tt.want {
-				t.Errorf("isLegacyCertificateName(%q) = %v, want %v", tt.displayName, got, tt.want)
-			}
-		})
-	}
-}
-
-// devnetCertDetailHandler builds a runtime ssl_certs detail response shared by
-// a legacy/current duplicate pair: same live SAN, same serial, so the current
-// duplicate is "stable" (no expiry, no serial mismatch) unless overridden.
-func devnetCertDetailHandler(storageName, serial string, notAfter time.Time) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{
-			"storage_name":%q,
-			"not_after":%q,
-			"not_before":"2026-05-08T00:00:00.000Z",
-			"serial":%q,
-			"subject_alternative_names":"DNS:*.devnet.rpcpool.com"
-		}`, storageName, notAfter.UTC().Format(time.RFC3339Nano), serial)
-	}
-}
-
-func TestCleanupLegacyDuplicateCertificatesRemovesConfirmedDuplicate(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	certPEM, keyPEM, cert := testCertificateBundleForDomain(t, "*.devnet.rpcpool.com", 0x0B74A913, time.Now().AddDate(0, 0, 90))
-	liveNotAfter := time.Now().AddDate(0, 0, 60)
-	serial := cert.SerialNumber.Text(16)
-
-	var deletes []string
-	var storageWrites []string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[
-				{"description":"_.devnet.rpcpool.com.pem","storage_name":"certs/_.devnet.rpcpool.com.pem"},
-				{"description":"__devnet_rpcpool_com.pem","storage_name":"certs/__devnet_rpcpool_com.pem"}
-			]`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/certs/_.devnet.rpcpool.com.pem":
-			devnetCertDetailHandler("certs/_.devnet.rpcpool.com.pem", serial, liveNotAfter)(w, r)
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/certs/__devnet_rpcpool_com.pem":
-			devnetCertDetailHandler("certs/__devnet_rpcpool_com.pem", serial, liveNotAfter)(w, r)
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/storage/ssl_certificates/"):
-			storageWrites = append(storageWrites, r.URL.Path)
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/storage/ssl_certificates/"):
-			if got := r.URL.Query().Get("skip_reload"); got != "true" {
-				t.Errorf("skip_reload = %q, want true", got)
-			}
-			deletes = append(deletes, r.URL.Path)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected %s %q", r.Method, r.URL.String())
-		}
-	}))
-	defer server.Close()
-
-	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
-	err = processHAProxyEndpoint(
-		logger,
-		config.Config{Certificatee: config.Certificatee{RenewBeforeDays: 30}},
-		fakeCertificateStore{
-			secretsByPath: map[string]map[string]any{
-				"certificates/*.devnet.rpcpool.com": {"certificate": certPEM, "private_key": keyPEM},
-			},
-		},
-		haproxyClient,
-		healthChecker,
-	)
-	if err != nil {
-		t.Fatalf("processHAProxyEndpoint() error = %v", err)
-	}
-
-	if len(deletes) != 1 || !strings.HasSuffix(deletes[0], "/__devnet_rpcpool_com.pem") {
-		t.Fatalf("deletes = %v, want exactly one delete of the legacy duplicate", deletes)
-	}
-	// Regression check for the delete/recreate thrash loop: once a legacy
-	// duplicate is classified, it must never go through the normal storage
-	// sync again in the same cycle, or the next cycle's rediscovery (HAProxy
-	// never drops it from ListCertificateRefs without a reload) would recreate
-	// the very file we just deleted.
-	if len(storageWrites) != 1 || !strings.HasSuffix(storageWrites[0], "/_.devnet.rpcpool.com.pem") {
-		t.Fatalf("storageWrites = %v, want exactly one write, for the keeper only", storageWrites)
-	}
-}
-
-// TestCleanupLegacyDuplicateCertificatesDoesNotThrashAcrossCycles is the
-// direct regression test for the delete/recreate loop: HAProxy's runtime
-// listing keeps reporting the legacy duplicate even after its storage file is
-// deleted (confirmed against a real Data Plane API - deleting from storage
-// with skip_reload=true never touches the live runtime listing). Running
-// processHAProxyEndpoint twice against that unchanging listing must not
-// recreate the deleted file on the second pass.
-func TestCleanupLegacyDuplicateCertificatesDoesNotThrashAcrossCycles(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	certPEM, keyPEM, cert := testCertificateBundleForDomain(t, "*.devnet.rpcpool.com", 0x0B74A913, time.Now().AddDate(0, 0, 90))
-	liveNotAfter := time.Now().AddDate(0, 0, 60)
-	serial := cert.SerialNumber.Text(16)
-
-	var deletes []string
-	var legacyStorageWrites []string
-	var keeperStorageWrites []string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
-			// HAProxy keeps listing both names every cycle: this is the
-			// stale, disconnected-from-disk runtime state that drove the
-			// original bug.
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[
-				{"description":"_.devnet.rpcpool.com.pem","storage_name":"certs/_.devnet.rpcpool.com.pem"},
-				{"description":"__devnet_rpcpool_com.pem","storage_name":"certs/__devnet_rpcpool_com.pem"}
-			]`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/certs/_.devnet.rpcpool.com.pem":
-			devnetCertDetailHandler("certs/_.devnet.rpcpool.com.pem", serial, liveNotAfter)(w, r)
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/certs/__devnet_rpcpool_com.pem":
-			devnetCertDetailHandler("certs/__devnet_rpcpool_com.pem", serial, liveNotAfter)(w, r)
-		case r.Method == http.MethodPut && r.URL.Path == "/v3/services/haproxy/storage/ssl_certificates/__devnet_rpcpool_com.pem":
-			legacyStorageWrites = append(legacyStorageWrites, r.URL.Path)
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/storage/ssl_certificates/"):
-			keeperStorageWrites = append(keeperStorageWrites, r.URL.Path)
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/storage/ssl_certificates/"):
-			deletes = append(deletes, r.URL.Path)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected %s %q", r.Method, r.URL.String())
-		}
-	}))
-	defer server.Close()
-
-	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	cfg := config.Config{Certificatee: config.Certificatee{RenewBeforeDays: 30}}
-	store := fakeCertificateStore{
-		secretsByPath: map[string]map[string]any{
-			"certificates/*.devnet.rpcpool.com": {"certificate": certPEM, "private_key": keyPEM},
-		},
-	}
-	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
-
-	for cycle := 1; cycle <= 2; cycle++ {
-		if err := processHAProxyEndpoint(logger, cfg, store, haproxyClient, healthChecker); err != nil {
-			t.Fatalf("processHAProxyEndpoint() cycle %d error = %v", cycle, err)
-		}
-	}
-
-	if len(legacyStorageWrites) != 0 {
-		t.Fatalf("legacyStorageWrites = %v, want zero across both cycles - this is the thrash bug", legacyStorageWrites)
-	}
-	if len(keeperStorageWrites) != 2 {
-		t.Fatalf("keeperStorageWrites = %v, want one per cycle", keeperStorageWrites)
-	}
-	if len(deletes) == 0 {
-		t.Fatal("deletes is empty, want at least one delete attempt for the legacy duplicate")
-	}
-}
-
-func TestCleanupLegacyDuplicateCertificatesSkipsWhenKeeperUnstable(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	certPEM, keyPEM, cert := testCertificateBundleForDomain(t, "*.devnet.rpcpool.com", 0x0B74A913, time.Now().AddDate(0, 0, 90))
-	liveNotAfter := time.Now().AddDate(0, 0, 60)
-	vaultSerial := cert.SerialNumber.Text(16)
-
-	var deletes []string
-	var storageWrites []string
-	var runtimeWrites []string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[
-				{"description":"_.devnet.rpcpool.com.pem","storage_name":"certs/_.devnet.rpcpool.com.pem"},
-				{"description":"__devnet_rpcpool_com.pem","storage_name":"certs/__devnet_rpcpool_com.pem"}
-			]`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/certs/_.devnet.rpcpool.com.pem":
-			// Keeper's live serial does not match Vault's: this cycle needs a
-			// runtime push, so it is not yet "stable".
-			devnetCertDetailHandler("certs/_.devnet.rpcpool.com.pem", "DEADBEEF0000", liveNotAfter)(w, r)
-		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/certs/__devnet_rpcpool_com.pem":
-			devnetCertDetailHandler("certs/__devnet_rpcpool_com.pem", vaultSerial, liveNotAfter)(w, r)
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/storage/ssl_certificates/"):
-			storageWrites = append(storageWrites, r.URL.Path)
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
-			runtimeWrites = append(runtimeWrites, r.URL.Path)
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete:
-			deletes = append(deletes, r.URL.Path)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected %s %q", r.Method, r.URL.String())
-		}
-	}))
-	defer server.Close()
-
-	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-
-	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
-	err = processHAProxyEndpoint(
-		logger,
-		config.Config{Certificatee: config.Certificatee{RenewBeforeDays: 30}},
-		fakeCertificateStore{
-			secretsByPath: map[string]map[string]any{
-				"certificates/*.devnet.rpcpool.com": {"certificate": certPEM, "private_key": keyPEM},
-			},
-		},
-		haproxyClient,
-		healthChecker,
-	)
-	if err != nil {
-		t.Fatalf("processHAProxyEndpoint() error = %v", err)
-	}
-
-	if len(deletes) != 0 {
-		t.Fatalf("deletes = %v, want no cleanup while the keeper still needs a runtime push", deletes)
-	}
-	// Falling back to the normal sync for the legacy duplicate this cycle
-	// means both files get persisted to storage, and the keeper's runtime
-	// gets the fresh push it needed - unmaintained certs are never left
-	// behind just because we're deferring cleanup.
-	if len(storageWrites) != 2 {
-		t.Fatalf("storageWrites = %v, want both duplicates persisted while cleanup is deferred", storageWrites)
-	}
-	if len(runtimeWrites) != 1 || !strings.Contains(runtimeWrites[0], "_.devnet.rpcpool.com.pem") {
-		t.Fatalf("runtimeWrites = %v, want exactly one runtime push, for the keeper", runtimeWrites)
-	}
-}
-
-func TestClassifyLegacyDuplicatesSkipsAmbiguousGroups(t *testing.T) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.PanicLevel)
-
-	sanCert := &haproxy.CertificateDetail{SubjectAlternativeNames: "DNS:*.devnet.rpcpool.com"}
-
-	t.Run("no current-format keeper", func(t *testing.T) {
-		details := []certRefDetail{
-			{ref: haproxy.CertificateRef{DisplayName: "__devnet_rpcpool_com.pem", APIName: "certs/__devnet_rpcpool_com.pem"}, haproxyCert: sanCert},
-			{ref: haproxy.CertificateRef{DisplayName: "__devnet_rpcpool_com_v2.pem", APIName: "certs/__devnet_rpcpool_com_v2.pem"}, haproxyCert: sanCert},
-		}
-		got := classifyLegacyDuplicates(logger, "test-endpoint", details)
-		if len(got) != 0 {
-			t.Fatalf("classifyLegacyDuplicates() = %v, want empty: no current-format certificate to keep", got)
-		}
-	})
-
-	t.Run("two current-format entries", func(t *testing.T) {
-		details := []certRefDetail{
-			{ref: haproxy.CertificateRef{DisplayName: "_.devnet.rpcpool.com.pem", APIName: "certs/_.devnet.rpcpool.com.pem"}, haproxyCert: sanCert},
-			{ref: haproxy.CertificateRef{DisplayName: "devnet.rpcpool.com.pem", APIName: "certs/devnet.rpcpool.com.pem"}, haproxyCert: sanCert},
-		}
-		got := classifyLegacyDuplicates(logger, "test-endpoint", details)
-		if len(got) != 0 {
-			t.Fatalf("classifyLegacyDuplicates() = %v, want empty: ambiguous which entry to keep", got)
-		}
-	})
-
-	t.Run("unambiguous pair still resolves", func(t *testing.T) {
-		details := []certRefDetail{
-			{ref: haproxy.CertificateRef{DisplayName: "_.devnet.rpcpool.com.pem", APIName: "certs/_.devnet.rpcpool.com.pem"}, haproxyCert: sanCert},
-			{ref: haproxy.CertificateRef{DisplayName: "__devnet_rpcpool_com.pem", APIName: "certs/__devnet_rpcpool_com.pem"}, haproxyCert: sanCert},
-		}
-		got := classifyLegacyDuplicates(logger, "test-endpoint", details)
-		want := map[string]string{"certs/__devnet_rpcpool_com.pem": "certs/_.devnet.rpcpool.com.pem"}
-		if len(got) != len(want) || got["certs/__devnet_rpcpool_com.pem"] != want["certs/__devnet_rpcpool_com.pem"] {
-			t.Fatalf("classifyLegacyDuplicates() = %v, want %v", got, want)
-		}
-	})
 }
