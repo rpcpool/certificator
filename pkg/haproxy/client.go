@@ -343,98 +343,11 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 	return nil
 }
 
-// UpdateStorageCertificate replaces a certificate on disk without asking
-// Data Plane API to reload HAProxy. Certificatee updates runtime separately
-// after this write so the new certificate is both durable and active.
-func (c *Client) UpdateStorageCertificate(certName, pemData string) error {
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?skip_reload=true", url.PathEscape(certName))
-	resp, err := c.doRequest("PUT", path, strings.NewReader(pemData), "text/plain")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return unexpectedStatusError(fmt.Sprintf("failed to update storage certificate %s", certName), resp.StatusCode, body)
-	}
-
-	c.logger.Debugf("Updated storage certificate %s", certName)
-	return nil
-}
-
-// CreateCertificate creates a new certificate entry on disk without asking
-// Data Plane API to reload HAProxy.
-func (c *Client) CreateCertificate(certName, pemData string) error {
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	part, err := writer.CreateFormFile("file_upload", certName)
-	if err != nil {
-		return errors.Wrap(err, "failed to create form file")
-	}
-	if _, err := part.Write([]byte(pemData)); err != nil {
-		return errors.Wrap(err, "failed to write certificate data")
-	}
-
-	if err := writer.Close(); err != nil {
-		return errors.Wrap(err, "failed to close multipart writer")
-	}
-
-	resp, err := c.doRequest("POST", "/v3/services/haproxy/storage/ssl_certificates?skip_reload=true", &buf, writer.FormDataContentType())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return unexpectedStatusError(fmt.Sprintf("failed to create storage certificate %s", certName), resp.StatusCode, body)
-	}
-
-	c.logger.Debugf("Created storage certificate %s", certName)
-	return nil
-}
-
-// EnsureStorageCertificate writes a certificate to disk, creating it if it does
-// not already exist. The write always uses skip_reload=true.
-func (c *Client) EnsureStorageCertificate(certName, pemData string) error {
-	if err := c.UpdateStorageCertificate(certName, pemData); err != nil {
-		if !IsHTTPStatus(err, http.StatusNotFound) {
-			return err
-		}
-
-		if err := c.CreateCertificate(certName, pemData); err != nil {
-			if IsHTTPStatus(err, http.StatusConflict) {
-				return c.UpdateStorageCertificate(certName, pemData)
-			}
-			return err
-		}
-	}
-
-	return nil
-}
-
-// DeleteCertificate removes a certificate file from HAProxy storage without
-// asking Data Plane API to reload HAProxy. The Data Plane API does not accept
-// a version parameter for this endpoint, unlike the configuration-changing
-// storage write endpoints.
-func (c *Client) DeleteCertificate(certName string) error {
-	path := fmt.Sprintf("/v3/services/haproxy/storage/ssl_certificates/%s?skip_reload=true", url.PathEscape(certName))
-	resp, err := c.doRequest("DELETE", path, nil, "")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return unexpectedStatusError(fmt.Sprintf("failed to delete certificate %s", certName), resp.StatusCode, body)
-	}
-
-	c.logger.Debugf("Deleted storage certificate %s", certName)
-	return nil
-}
+// Certificatee no longer writes to the Data Plane API's storage endpoint:
+// client-native's storage layer sanitizes dotted certificate names to a
+// different file than the one haproxy.cfg actually loads, so a storage write
+// silently misses the file HAProxy reads on reload. Only the runtime
+// endpoint above (UpdateCertificate) is used now.
 
 // ExtractDomainFromPath extracts the domain name from a certificate path
 // Example: /etc/haproxy/certs/example.com.pem -> example.com
@@ -463,11 +376,6 @@ func NormalizeDomainForVault(domain string) string {
 		return "*." + domain[2:]
 	}
 	return domain
-}
-
-func StorageCertificateName(certPath string) string {
-	parts := strings.Split(certPath, "/")
-	return parts[len(parts)-1]
 }
 
 // IsExpiring checks if a certificate is expiring within the given number of days

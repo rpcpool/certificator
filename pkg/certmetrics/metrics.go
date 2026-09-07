@@ -65,15 +65,6 @@ var (
 		Name: "certificatee_certificate_metadata_lookup_failures_total",
 		Help: "Total number of HAProxy Data Plane API per-certificate metadata lookup failures",
 	}, []string{"endpoint", "domain"})
-	LegacyCertificatesRemoved = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificatee_legacy_certificates_removed_total",
-		Help: "Total number of legacy duplicate certificate files removed from HAProxy storage",
-	}, []string{"endpoint", "domain"})
-	LegacyCertificatesRemovalFailures = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "certificatee_legacy_certificates_removal_failures_total",
-		Help: "Total number of failed attempts to remove a legacy duplicate certificate file from HAProxy storage",
-	}, []string{"endpoint", "domain"})
-
 	DataPlaneAPIVersion = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "certificatee_dataplaneapi_version",
 		Help: "Detected HAProxy Data Plane API version for certificatee endpoints (1 = detected version)",
