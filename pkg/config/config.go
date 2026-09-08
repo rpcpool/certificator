@@ -67,6 +67,11 @@ type Certificatee struct {
 	HAProxyDataPlaneAPIPassword string `envconfig:"HAPROXY_DATAPLANE_API_PASSWORD"`
 	// HAProxyDataPlaneAPIInsecure skips TLS certificate verification (not recommended for production)
 	HAProxyDataPlaneAPIInsecure bool `envconfig:"HAPROXY_DATAPLANE_API_INSECURE" default:"false"`
+	// ExpectedDomains is the manifest of domains this endpoint should be
+	// serving. A domain missing from HAProxy's live certificate list is
+	// installed via the runtime crt-list API instead of only being updated.
+	// Empty by default: no behavior change until a job sets it.
+	ExpectedDomains []string `envconfig:"CERTIFICATEE_EXPECTED_DOMAINS" default:""`
 }
 
 // LoadConfig loads configuration options to  variable

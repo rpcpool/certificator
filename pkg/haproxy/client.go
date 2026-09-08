@@ -343,6 +343,136 @@ func (c *Client) UpdateCertificate(certName, pemData string) error {
 	return nil
 }
 
+// CreateRuntimeCertificate creates a brand-new certificate entry in the
+// HAProxy runtime certificate store -- for a name Data Plane API has never
+// seen, unlike UpdateCertificate, which only replaces an existing entry.
+func (c *Client) CreateRuntimeCertificate(certName, pemData string) error {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("file_upload", certName)
+	if err != nil {
+		return errors.Wrap(err, "failed to create form file")
+	}
+	if _, err := part.Write([]byte(pemData)); err != nil {
+		return errors.Wrap(err, "failed to write certificate data")
+	}
+	if err := writer.Close(); err != nil {
+		return errors.Wrap(err, "failed to close multipart writer")
+	}
+
+	resp, err := c.doRequest("POST", "/v3/services/haproxy/runtime/ssl_certs", &buf, writer.FormDataContentType())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return unexpectedStatusError(fmt.Sprintf("failed to create runtime certificate %s", certName), resp.StatusCode, body)
+	}
+
+	c.logger.Debugf("Created runtime certificate %s", certName)
+	return nil
+}
+
+// ListCrtLists returns the crt-list files HAProxy currently knows about.
+// Every bind on a host normally shares one crt-list, so this is typically a
+// single-element list.
+func (c *Client) ListCrtLists() ([]string, error) {
+	resp, err := c.doRequest("GET", "/v3/services/haproxy/runtime/ssl_crt_lists", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, unexpectedStatusError("failed to list crt-lists", resp.StatusCode, body)
+	}
+
+	var raw []struct {
+		File string `json:"file"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, errors.Wrap(err, "failed to decode crt-list response")
+	}
+
+	names := make([]string, 0, len(raw))
+	for _, r := range raw {
+		names = append(names, r.File)
+	}
+	return names, nil
+}
+
+// ListCrtListEntries returns the certificate names currently wired into the
+// named crt-list, as a set for cheap membership checks.
+func (c *Client) ListCrtListEntries(crtListName string) (map[string]bool, error) {
+	path := fmt.Sprintf("/v3/services/haproxy/runtime/ssl_crt_lists/entries?name=%s", url.QueryEscape(crtListName))
+	resp, err := c.doRequest("GET", path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, unexpectedStatusError(fmt.Sprintf("failed to list entries for crt-list %s", crtListName), resp.StatusCode, body)
+	}
+
+	var raw []struct {
+		File string `json:"file"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, errors.Wrap(err, "failed to decode crt-list entries response")
+	}
+
+	entries := make(map[string]bool, len(raw))
+	for _, r := range raw {
+		entries[r.File] = true
+	}
+	return entries, nil
+}
+
+// AddCrtListEntry wires an existing runtime certificate into the named
+// crt-list so it starts participating in SNI matching for whatever bind(s)
+// reference that list. HAProxy selects among a crt-list's entries by each
+// certificate's own embedded SAN, so no explicit SNI filter is needed here.
+func (c *Client) AddCrtListEntry(crtListName, certName string) error {
+	path := fmt.Sprintf("/v3/services/haproxy/runtime/ssl_crt_lists/entries?name=%s", url.QueryEscape(crtListName))
+	body, err := json.Marshal(map[string]string{"file": certName})
+	if err != nil {
+		return errors.Wrap(err, "failed to encode crt-list entry")
+	}
+
+	resp, err := c.doRequest("POST", path, bytes.NewReader(body), "application/json")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return unexpectedStatusError(fmt.Sprintf("failed to add %s to crt-list %s", certName, crtListName), resp.StatusCode, respBody)
+	}
+
+	c.logger.Debugf("Added %s to crt-list %s", certName, crtListName)
+	return nil
+}
+
+// CertificateNameForDomain computes the runtime certificate store name for a
+// domain that has no existing HAProxy entry to derive one from -- the
+// inverse of NormalizeDomainForVault, and the same convention cert_guard.yml
+// and the legacy lego scripts already use for on-disk filenames: only the
+// leading wildcard "*." becomes "_.", every other character is left alone.
+func CertificateNameForDomain(domain string) string {
+	name := domain
+	if strings.HasPrefix(name, "*.") {
+		name = "_." + name[2:]
+	}
+	return "certs/" + name + ".pem"
+}
+
 // Certificatee no longer writes to the Data Plane API's storage endpoint:
 // client-native's storage layer sanitizes dotted certificate names to a
 // different file than the one haproxy.cfg actually loads, so a storage write

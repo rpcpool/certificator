@@ -570,6 +570,174 @@ func TestUpdateCertificate(t *testing.T) {
 	}
 }
 
+func TestCreateRuntimeCertificate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantErr    bool
+	}{
+		{name: "success - created", statusCode: http.StatusCreated, wantErr: false},
+		{name: "success - ok", statusCode: http.StatusOK, wantErr: false},
+		{name: "error - conflict", statusCode: http.StatusConflict, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockDataPlaneAPI(t)
+			defer mock.Close()
+
+			certName := "certs/_.devnet.rpcpool.com.pem"
+			pemData := "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
+
+			mock.SetHandler("POST", "/v3/services/haproxy/runtime/ssl_certs", func(w http.ResponseWriter, r *http.Request) {
+				contentType := r.Header.Get("Content-Type")
+				if !strings.Contains(contentType, "multipart/form-data") {
+					t.Errorf("Content-Type = %q, want multipart/form-data", contentType)
+				}
+
+				if err := r.ParseMultipartForm(10 << 20); err != nil {
+					t.Errorf("Failed to parse multipart form: %v", err)
+				}
+				file, header, err := r.FormFile("file_upload")
+				if err != nil {
+					t.Errorf("Failed to get file from form: %v", err)
+				} else {
+					defer func() { _ = file.Close() }()
+					if header.Filename != filepath.Base(certName) {
+						t.Errorf("Filename = %q, want %q", header.Filename, filepath.Base(certName))
+					}
+					data, _ := io.ReadAll(file)
+					if string(data) != pemData {
+						t.Errorf("File data = %q, want %q", string(data), pemData)
+					}
+				}
+
+				w.WriteHeader(tt.statusCode)
+			})
+
+			client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+
+			err = client.CreateRuntimeCertificate(certName, pemData)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateRuntimeCertificate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestListCrtLists(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+
+	mock.SetHandler("GET", "/v3/services/haproxy/runtime/ssl_crt_lists", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"file":"crt-list.txt"}]`))
+	})
+
+	client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	got, err := client.ListCrtLists()
+	if err != nil {
+		t.Fatalf("ListCrtLists() error = %v", err)
+	}
+	want := []string{"crt-list.txt"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("ListCrtLists() = %v, want %v", got, want)
+	}
+}
+
+func TestListCrtListEntries(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+
+	mock.SetHandler("GET", "/v3/services/haproxy/runtime/ssl_crt_lists/entries", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("name"); got != "crt-list.txt" {
+			t.Errorf("name query = %q, want crt-list.txt", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"file":"certs/snakeoil.pem"},{"file":"certs/_.devnet.rpcpool.com.pem"}]`))
+	})
+
+	client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	got, err := client.ListCrtListEntries("crt-list.txt")
+	if err != nil {
+		t.Fatalf("ListCrtListEntries() error = %v", err)
+	}
+	if !got["certs/snakeoil.pem"] || !got["certs/_.devnet.rpcpool.com.pem"] || len(got) != 2 {
+		t.Fatalf("ListCrtListEntries() = %v, want exactly the two seeded entries", got)
+	}
+}
+
+func TestAddCrtListEntry(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	mock := newMockDataPlaneAPI(t)
+	defer mock.Close()
+
+	mock.SetHandler("POST", "/v3/services/haproxy/runtime/ssl_crt_lists/entries", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("name"); got != "crt-list.txt" {
+			t.Errorf("name query = %q, want crt-list.txt", got)
+		}
+
+		var body struct {
+			File string `json:"file"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		if body.File != "certs/_.devnet.rpcpool.com.pem" {
+			t.Errorf("file = %q, want certs/_.devnet.rpcpool.com.pem", body.File)
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	client, err := NewClient(ClientConfig{BaseURL: mock.URL()}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	if err := client.AddCrtListEntry("crt-list.txt", "certs/_.devnet.rpcpool.com.pem"); err != nil {
+		t.Fatalf("AddCrtListEntry() error = %v", err)
+	}
+}
+
+func TestCertificateNameForDomain(t *testing.T) {
+	tests := []struct {
+		domain string
+		want   string
+	}{
+		{"*.devnet.rpcpool.com", "certs/_.devnet.rpcpool.com.pem"},
+		{"api.mainnet.solana.com", "certs/api.mainnet.solana.com.pem"},
+	}
+
+	for _, tt := range tests {
+		if got := CertificateNameForDomain(tt.domain); got != tt.want {
+			t.Errorf("CertificateNameForDomain(%q) = %q, want %q", tt.domain, got, tt.want)
+		}
+	}
+}
+
 func TestGetCertificateDetail(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
