@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -539,5 +540,147 @@ func TestProcessHAProxyEndpointUsesSANAndExistingCertificateName(t *testing.T) {
 	}
 	if got := cert.SerialNumber.Text(16); got == "aabb" {
 		t.Fatal("test certificate serial unexpectedly matches live serial")
+	}
+}
+
+func TestProcessHAProxyEndpointInstallsMissingCertificate(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	certPEM, keyPEM, _ := testCertificateBundleForDomain(t, "*.devnet.rpcpool.com", 0x0B74A913, time.Now().AddDate(0, 0, 90))
+	const certName = "certs/_.devnet.rpcpool.com.pem"
+
+	var created bool
+	var addedEntry bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs/"+certName:
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_crt_lists":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"file":"crt-list.txt"}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_crt_lists/entries":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
+			created = true
+			if err := r.ParseMultipartForm(10 << 20); err != nil {
+				t.Fatalf("failed to parse multipart form: %v", err)
+			}
+			file, header, err := r.FormFile("file_upload")
+			if err != nil {
+				t.Fatalf("failed to get file from form: %v", err)
+			}
+			defer func() { _ = file.Close() }()
+			if header.Filename != "_.devnet.rpcpool.com.pem" {
+				t.Errorf("filename = %q, want _.devnet.rpcpool.com.pem", header.Filename)
+			}
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/services/haproxy/runtime/ssl_crt_lists/entries":
+			addedEntry = true
+			if got := r.URL.Query().Get("name"); got != "crt-list.txt" {
+				t.Errorf("crt-list name = %q, want crt-list.txt", got)
+			}
+			var body struct {
+				File string `json:"file"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode crt-list entry body: %v", err)
+			}
+			if body.File != certName {
+				t.Errorf("crt-list entry file = %q, want %q", body.File, certName)
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			t.Fatalf("unexpected %s %q", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
+	err = processHAProxyEndpoint(
+		logger,
+		config.Config{Certificatee: config.Certificatee{
+			RenewBeforeDays: 30,
+			ExpectedDomains: []string{"*.devnet.rpcpool.com"},
+		}},
+		fakeCertificateStore{
+			secretsByPath: map[string]map[string]any{
+				"certificates/*.devnet.rpcpool.com": {"certificate": certPEM, "private_key": keyPEM},
+			},
+		},
+		haproxyClient,
+		healthChecker,
+	)
+	if err != nil {
+		t.Fatalf("processHAProxyEndpoint() error = %v", err)
+	}
+
+	if !created {
+		t.Error("certificate was not created via the runtime create endpoint")
+	}
+	if !addedEntry {
+		t.Error("certificate was not wired into the crt-list")
+	}
+}
+
+func TestProcessHAProxyEndpointSkipsAlreadyPresentDomain(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+
+	liveNotAfter := time.Now().AddDate(0, 0, 60).UTC().Format(time.RFC3339Nano)
+	certPEM, keyPEM, cert := testCertificateBundleForDomain(t, "*.devnet.rpcpool.com", 0x0B74A913, time.Now().AddDate(0, 0, 90))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/services/haproxy/runtime/ssl_certs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"description":"_.devnet.rpcpool.com.pem","storage_name":"certs/_.devnet.rpcpool.com.pem"}]`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v3/services/haproxy/runtime/ssl_certs/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{
+				"storage_name":"certs/_.devnet.rpcpool.com.pem",
+				"not_after":%q,
+				"not_before":"2026-05-08T00:00:00.000Z",
+				"serial":%q,
+				"subject_alternative_names":"DNS:*.devnet.rpcpool.com"
+			}`, liveNotAfter, cert.SerialNumber.Text(16))
+		default:
+			t.Fatalf("unexpected %s %q, want no crt-list calls for a domain already present", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	haproxyClient, err := haproxy.NewClient(haproxy.ClientConfig{BaseURL: server.URL}, logger)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	healthChecker := newCertificateeHealthChecker(nil, time.Minute)
+	err = processHAProxyEndpoint(
+		logger,
+		config.Config{Certificatee: config.Certificatee{
+			RenewBeforeDays: 30,
+			ExpectedDomains: []string{"*.devnet.rpcpool.com"},
+		}},
+		fakeCertificateStore{
+			secretsByPath: map[string]map[string]any{
+				"certificates/*.devnet.rpcpool.com": {"certificate": certPEM, "private_key": keyPEM},
+			},
+		},
+		haproxyClient,
+		healthChecker,
+	)
+	if err != nil {
+		t.Fatalf("processHAProxyEndpoint() error = %v", err)
 	}
 }

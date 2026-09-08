@@ -177,6 +177,8 @@ func processHAProxyEndpoint(logger *logrus.Logger, cfg config.Config, vaultClien
 		syncOneCertificate(logger, cfg, vaultClient, haproxyClient, endpoint, d, &errs, &expiringCount, &skippedVaultCount)
 	}
 
+	installMissingCertificates(logger, cfg, vaultClient, haproxyClient, endpoint, certRefs, &errs)
+
 	// Record expiring certificates count
 	certmetrics.CertificatesExpiring.WithLabelValues(endpoint).Set(float64(expiringCount))
 	if skippedVaultCount > 0 {
@@ -247,6 +249,162 @@ func syncOneCertificate(
 	}
 
 	logger.Infof("[%s] Certificate %s is up to date", endpoint, displayName)
+}
+
+// installMissingCertificates installs a certificate for every domain in
+// cfg.Certificatee.ExpectedDomains that HAProxy doesn't already have loaded
+// (certRefs, from this cycle's ListCertificateRefs), entirely through the
+// Data Plane API runtime: no on-disk file, real or placeholder, is ever
+// needed for a domain to go from "never served" to "installed". Domains
+// already present go through the normal update path in the main loop
+// instead -- this only handles ones with no existing entry at all.
+func installMissingCertificates(
+	logger *logrus.Logger,
+	cfg config.Config,
+	vaultClient certificateStore,
+	haproxyClient *haproxy.Client,
+	endpoint string,
+	certRefs []haproxy.CertificateRef,
+	errs *[]error,
+) {
+	expected := cfg.Certificatee.ExpectedDomains
+	if len(expected) == 0 {
+		return
+	}
+
+	present := make(map[string]struct{}, len(certRefs))
+	for _, ref := range certRefs {
+		present[domainFromCertificateName(ref.DisplayName)] = struct{}{}
+	}
+
+	var missing []string
+	for _, domain := range expected {
+		if _, ok := present[domain]; !ok {
+			missing = append(missing, domain)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	crtLists, err := haproxyClient.ListCrtLists()
+	if err != nil {
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] failed to list crt-lists, cannot install %d missing certificate(s): %v", endpoint, len(missing), err)
+		return
+	}
+	if len(crtLists) == 0 {
+		err := fmt.Errorf("no crt-list found, cannot install %d missing certificate(s)", len(missing))
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] %v", endpoint, err)
+		return
+	}
+	crtListName := crtLists[0]
+
+	crtListEntries, err := haproxyClient.ListCrtListEntries(crtListName)
+	if err != nil {
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] failed to list entries for crt-list %s: %v", endpoint, crtListName, err)
+		return
+	}
+
+	for _, domain := range missing {
+		installOneCertificate(logger, vaultClient, haproxyClient, endpoint, crtListName, crtListEntries, domain, errs)
+	}
+}
+
+// installOneCertificate installs a single missing domain: reads its
+// certificate from Vault, creates (or, if a previous cycle got partway
+// through, updates) the runtime certificate store entry, then wires it into
+// the crt-list if it isn't already there.
+func installOneCertificate(
+	logger *logrus.Logger,
+	vaultClient certificateStore,
+	haproxyClient *haproxy.Client,
+	endpoint string,
+	crtListName string,
+	crtListEntries map[string]bool,
+	domain string,
+	errs *[]error,
+) {
+	logger.Infof("[%s] Installing missing certificate for %s", endpoint, domain)
+
+	certificateSecrets, vaultCert, err := readVaultCertificateBundle(domain, vaultClient)
+	if err != nil {
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] %v", endpoint, err)
+		certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+		return
+	}
+
+	if err := validateVaultCertificateForInstall(domain, vaultCert); err != nil {
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] %v", endpoint, err)
+		certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+		return
+	}
+
+	pemData, err := buildPEMBundle(certificateSecrets)
+	if err != nil {
+		err = fmt.Errorf("failed to build PEM bundle for %s: %w", domain, err)
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] %v", endpoint, err)
+		certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+		return
+	}
+
+	certName := haproxy.CertificateNameForDomain(domain)
+
+	// A previous cycle may have created the certificate store entry but
+	// failed before wiring it into the crt-list -- check rather than assume,
+	// so a retry doesn't try to create a name that already exists.
+	if _, detailErr := haproxyClient.GetCertificateDetail(certName); detailErr == nil {
+		if err := haproxyClient.UpdateCertificate(certName, pemData); err != nil {
+			err = fmt.Errorf("failed to refresh partially-installed certificate %s: %w", certName, err)
+			*errs = append(*errs, err)
+			logger.Errorf("[%s] %v", endpoint, err)
+			certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+			return
+		}
+	} else if err := haproxyClient.CreateRuntimeCertificate(certName, pemData); err != nil {
+		err = fmt.Errorf("failed to create certificate %s: %w", certName, err)
+		*errs = append(*errs, err)
+		logger.Errorf("[%s] %v", endpoint, err)
+		certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+		return
+	}
+
+	if !crtListEntries[certName] {
+		if err := haproxyClient.AddCrtListEntry(crtListName, certName); err != nil {
+			err = fmt.Errorf("failed to wire %s into crt-list %s: %w", certName, crtListName, err)
+			*errs = append(*errs, err)
+			logger.Errorf("[%s] %v", endpoint, err)
+			certmetrics.CertificatesUpdateFailures.WithLabelValues(endpoint, domain).Inc()
+			return
+		}
+	}
+
+	certmetrics.CertificatesUpdated.WithLabelValues(endpoint, domain).Inc()
+	logger.Infof("[%s] Installed certificate for %s", endpoint, domain)
+}
+
+// validateVaultCertificateForInstall checks a Vault certificate is usable
+// for a brand-new install. Unlike validateVaultCertificateForUpdateAt, there
+// is no live HAProxy certificate yet to compare expiry or SANs against.
+func validateVaultCertificateForInstall(domain string, vaultCert *x509.Certificate) error {
+	if vaultCert == nil {
+		return fmt.Errorf("certificate for %s does not exist in vault", domain)
+	}
+
+	if vaultCert.IsCA {
+		return fmt.Errorf("refusing to install %s: Vault certificate bundle starts with a CA certificate", domain)
+	}
+
+	if certificate.IsExpired(vaultCert, time.Now()) {
+		return fmt.Errorf("refusing to install %s: Vault certificate expired on %s", domain, vaultCert.NotAfter.Format(time.RFC3339))
+	}
+
+	return nil
 }
 
 func setDataPlaneAPIVersion(endpoint, version string) {
