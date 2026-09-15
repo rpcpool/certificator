@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -18,26 +18,24 @@ import (
 const dataPlaneURLsReloadDebounce = 250 * time.Millisecond
 
 // haproxyClientSet lets a background file watcher swap the live client list
-// while the ticker loop reads a consistent snapshot, no restart needed.
+// while the ticker loop reads a consistent snapshot, no restart needed. A
+// plain atomic swap of one value, not a map, so atomic.Pointer over a mutex.
 type haproxyClientSet struct {
-	mu      sync.RWMutex
-	clients []*haproxy.Client
+	clients atomic.Pointer[[]*haproxy.Client]
 }
 
 func newHAProxyClientSet(clients []*haproxy.Client) *haproxyClientSet {
-	return &haproxyClientSet{clients: clients}
+	s := &haproxyClientSet{}
+	s.Set(clients)
+	return s
 }
 
 func (s *haproxyClientSet) Get() []*haproxy.Client {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.clients
+	return *s.clients.Load()
 }
 
 func (s *haproxyClientSet) Set(clients []*haproxy.Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.clients = clients
+	s.clients.Store(&clients)
 }
 
 // readDataPlaneURLsFile parses a comma- or newline-separated URL list.
