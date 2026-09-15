@@ -46,14 +46,14 @@ func TestReadDataPlaneURLsFile(t *testing.T) {
 			want:    []string{"http://10.0.0.1:5555", "http://10.0.0.2:5555"},
 		},
 		{
-			name:    "empty file is an error, not an empty list",
+			name:    "empty file is a valid, empty list - not an error",
 			content: "",
-			wantErr: true,
+			want:    nil,
 		},
 		{
-			name:    "whitespace-only file is an error",
+			name:    "whitespace-only file is also a valid, empty list",
 			content: "\n\n  \n",
-			wantErr: true,
+			want:    nil,
 		},
 	}
 
@@ -149,14 +149,14 @@ func TestWatchDataPlaneURLsFileReload(t *testing.T) {
 	t.Fatalf("watchDataPlaneURLsFile did not pick up the renamed file within the deadline; got %d client(s)", len(clientSet.Get()))
 }
 
-// TestWatchDataPlaneURLsFileKeepsPreviousOnBadReload confirms a reload that
-// can't produce a valid client list (file briefly empty mid-write, unparsable
-// content) leaves the previous, still-good client set in place instead of
-// emptying it out - the whole point of this mechanism is to never repeat the
-// "HAPROXY_DATAPLANE_API_URLS must be set" fatal exit on a transient render.
-func TestWatchDataPlaneURLsFileKeepsPreviousOnBadReload(t *testing.T) {
+// newSeededWatch seeds a one-URL fixture file, builds its initial client
+// set, and starts watchDataPlaneURLsFile against it. Shared setup for the
+// two reload-outcome tests below.
+func newSeededWatch(t *testing.T) (path string, clientSet *haproxyClientSet) {
+	t.Helper()
+
 	dir := t.TempDir()
-	path := filepath.Join(dir, "dataplane-urls")
+	path = filepath.Join(dir, "dataplane-urls")
 
 	if err := os.WriteFile(path, []byte("http://10.0.0.1:5555"), 0o644); err != nil {
 		t.Fatalf("failed to seed fixture: %v", err)
@@ -175,19 +175,61 @@ func TestWatchDataPlaneURLsFileKeepsPreviousOnBadReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to build initial client set: %v", err)
 	}
-	clientSet := newHAProxyClientSet(initial)
+	clientSet = newHAProxyClientSet(initial)
 
 	go watchDataPlaneURLsFile(cfg, logger, clientSet)
 	time.Sleep(50 * time.Millisecond)
 
-	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
-		t.Fatalf("failed to write empty fixture: %v", err)
+	return path, clientSet
+}
+
+// TestWatchDataPlaneURLsFileAdoptsEmptyList confirms a reload that reads
+// fine but has no URLs left in it - the sole watched target deregistering,
+// say - is adopted as a real, empty client set rather than treated as a
+// failure. This is the behavior that keeps certificatee from having to
+// choose between crashing and silently going stale when its target list
+// legitimately empties out.
+func TestWatchDataPlaneURLsFileAdoptsEmptyList(t *testing.T) {
+	path, clientSet := newSeededWatch(t)
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, nil, 0o644); err != nil {
+		t.Fatalf("failed to write empty replacement fixture: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("failed to rename empty replacement fixture into place: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(clientSet.Get()) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf("watchDataPlaneURLsFile did not adopt the empty list within the deadline; got %d client(s)", len(clientSet.Get()))
+}
+
+// TestWatchDataPlaneURLsFileKeepsPreviousOnReadFailure confirms a reload
+// that genuinely can't read the file - as opposed to reading it and finding
+// it empty - leaves the previous, still-good client set in place. Replacing
+// the file with a directory of the same name is a permission-independent
+// way to force os.ReadFile to fail.
+func TestWatchDataPlaneURLsFileKeepsPreviousOnReadFailure(t *testing.T) {
+	path, clientSet := newSeededWatch(t)
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("failed to remove fixture: %v", err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("failed to replace fixture with a directory: %v", err)
 	}
 
 	time.Sleep(dataPlaneURLsReloadDebounce + 500*time.Millisecond)
 
 	got := clientSet.Get()
 	if len(got) != 1 || got[0].Endpoint() != "http://10.0.0.1:5555" {
-		t.Fatalf("client set changed after a bad reload; got %d client(s), want the original 1 kept", len(got))
+		t.Fatalf("client set changed after an unreadable-file reload; got %d client(s), want the original 1 kept", len(got))
 	}
 }

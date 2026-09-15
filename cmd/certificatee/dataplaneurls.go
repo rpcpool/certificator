@@ -49,6 +49,13 @@ func (s *haproxyClientSet) Set(clients []*haproxy.Client) {
 // the same comma-separated form as the HAPROXY_DATAPLANE_API_URLS env var on
 // a single line, one URL per line, or a mix of both - whatever the writer on
 // the other end finds convenient to render.
+//
+// A file that reads fine but contains no URLs is not an error: it returns an
+// empty (nil) slice, so a genuinely empty target list - a sole watched
+// target deregistering, a tag with no current members - flows through as a
+// valid "nothing to talk to right now" instead of being indistinguishable
+// from a broken render. Only a read failure (missing file, permission
+// error) is an error here.
 func readDataPlaneURLsFile(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -64,10 +71,6 @@ func readDataPlaneURLsFile(path string) ([]string, error) {
 			}
 			urls = append(urls, part)
 		}
-	}
-
-	if len(urls) == 0 {
-		return nil, fmt.Errorf("%s contains no HAProxy Data Plane API URLs", path)
 	}
 
 	return urls, nil

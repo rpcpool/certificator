@@ -213,14 +213,16 @@ func TestNewClients(t *testing.T) {
 		wantCount int
 	}{
 		{
-			name:    "empty slice",
-			configs: []ClientConfig{},
-			wantErr: true,
+			name:      "empty slice",
+			configs:   []ClientConfig{},
+			wantErr:   false,
+			wantCount: 0,
 		},
 		{
-			name:    "nil slice",
-			configs: nil,
-			wantErr: true,
+			name:      "nil slice",
+			configs:   nil,
+			wantErr:   false,
+			wantCount: 0,
 		},
 		{
 			name: "single endpoint",
@@ -256,7 +258,8 @@ func TestNewClients(t *testing.T) {
 				{BaseURL: ""},
 				{BaseURL: ""},
 			},
-			wantErr: true,
+			wantErr:   false,
+			wantCount: 0,
 		},
 	}
 
