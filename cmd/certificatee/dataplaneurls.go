@@ -14,16 +14,11 @@ import (
 	"github.com/vinted/certificator/pkg/haproxy"
 )
 
-// dataPlaneURLsReloadDebounce coalesces the burst of fs events a single
-// logical write can produce (Nomad's template renderer writes to a temp
-// file and renames it into place, which is a create + a write on the same
-// path) into one reload.
+// Coalesces the create+write pair a single atomic render produces.
 const dataPlaneURLsReloadDebounce = 250 * time.Millisecond
 
-// haproxyClientSet holds the live set of HAProxy clients certificatee talks
-// to. It exists so a background file watcher can swap the set in place
-// while maybeUpdateCertificates keeps reading a consistent snapshot on its
-// own ticker cadence, with no restart in between.
+// haproxyClientSet lets a background file watcher swap the live client list
+// while the ticker loop reads a consistent snapshot, no restart needed.
 type haproxyClientSet struct {
 	mu      sync.RWMutex
 	clients []*haproxy.Client
@@ -45,19 +40,10 @@ func (s *haproxyClientSet) Set(clients []*haproxy.Client) {
 	s.clients = clients
 }
 
-// readDataPlaneURLsFile parses a HAPROXY_DATAPLANE_API_URLS_FILE. It accepts
-// the same comma-separated form as the HAPROXY_DATAPLANE_API_URLS env var on
-// a single line, one URL per line, or a mix of both - whatever the writer on
-// the other end finds convenient to render.
-//
-// A file that reads fine but contains no URLs is not an error: it returns an
-// empty (nil) slice, so a genuinely empty target list - a sole watched
-// target deregistering, a tag with no current members - flows through as a
-// valid "nothing to talk to right now" instead of being indistinguishable
-// from a broken render. Only a read failure (missing file, permission
-// error) is an error here.
+// readDataPlaneURLsFile parses a comma- or newline-separated URL list.
+// A file that reads but is empty returns (nil, nil), not an error.
 func readDataPlaneURLsFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is operator-supplied config (HAPROXY_DATAPLANE_API_URLS_FILE / a Nomad template destination), not user input
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
@@ -76,14 +62,8 @@ func readDataPlaneURLsFile(path string) ([]string, error) {
 	return urls, nil
 }
 
-// watchDataPlaneURLsFile watches HAProxyDataPlaneAPIURLsFile for changes and
-// swaps clientSet's contents in place on every reload that produces a valid,
-// non-empty client list. It runs until the watcher itself fails to start; a
-// reload that fails (unreadable file, unparseable content, a bad URL) is
-// logged and the previous client set is kept rather than emptied out or
-// crashed - a transient render (a temp file mid-write, a blocking Consul
-// query that hasn't populated a single endpoint yet) should never take
-// certificatee's whole target list to zero.
+// watchDataPlaneURLsFile watches the URLs file and swaps clientSet on each
+// valid change. A reload that fails to read keeps the previous client set.
 func watchDataPlaneURLsFile(cfg config.Config, logger *logrus.Logger, clientSet *haproxyClientSet) {
 	path := cfg.Certificatee.HAProxyDataPlaneAPIURLsFile
 	dir := filepath.Dir(path)
@@ -94,12 +74,14 @@ func watchDataPlaneURLsFile(cfg config.Config, logger *logrus.Logger, clientSet 
 		logger.Errorf("HAPROXY_DATAPLANE_API_URLS_FILE watcher: failed to create fsnotify watcher, live reload disabled: %v", err)
 		return
 	}
-	defer watcher.Close()
+	defer func() {
+		if err := watcher.Close(); err != nil {
+			logger.Warnf("HAPROXY_DATAPLANE_API_URLS_FILE watcher: failed to close fsnotify watcher: %v", err)
+		}
+	}()
 
-	// Watch the containing directory, not the file itself: a rename-based
-	// atomic render (write a temp file, rename over the target) replaces the
-	// watched inode, which silently drops a watch held on the file path
-	// alone.
+	// Watch the directory: a rename-based atomic write replaces the inode,
+	// which drops a watch held on the file path alone.
 	if err := watcher.Add(dir); err != nil {
 		logger.Errorf("HAPROXY_DATAPLANE_API_URLS_FILE watcher: failed to watch %s, live reload disabled: %v", dir, err)
 		return

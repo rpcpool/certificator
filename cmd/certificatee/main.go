@@ -66,10 +66,7 @@ func main() {
 	logger := cfg.Log.Logger
 	legoLog.Logger = logger
 
-	// HAProxyDataPlaneAPIURLsFile, when set, is the source of truth at
-	// startup - it takes precedence over HAPROXY_DATAPLANE_API_URLS so a
-	// caller wiring up live reload doesn't also need to keep an env var in
-	// sync with it.
+	// The file, when set, takes precedence over HAPROXY_DATAPLANE_API_URLS.
 	usingDataPlaneURLsFile := cfg.Certificatee.HAProxyDataPlaneAPIURLsFile != ""
 	if usingDataPlaneURLsFile {
 		urls, err := readDataPlaneURLsFile(cfg.Certificatee.HAProxyDataPlaneAPIURLsFile)
@@ -79,12 +76,7 @@ func main() {
 		cfg.Certificatee.HAProxyDataPlaneAPIURLs = urls
 	}
 
-	// An empty HAProxy Data Plane API target list is not fatal: it means
-	// there is nothing to sync this cycle, not that certificatee is
-	// misconfigured. The sole watched target transiently deregistering, or
-	// a tag with no current members, are both real, recoverable states -
-	// the ticker loop below simply does nothing until the list is non-empty
-	// again, on the next tick or the next file reload.
+	// Zero endpoints is not fatal - the ticker loop just has nothing to do.
 	if len(cfg.Certificatee.HAProxyDataPlaneAPIURLs) == 0 {
 		logger.Warn("no HAProxy Data Plane API URLs configured yet; starting with zero endpoints")
 	}

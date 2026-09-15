@@ -13,10 +13,8 @@ import (
 	"github.com/vinted/certificator/pkg/config"
 )
 
-// testLogger discards output rather than routing it through t.Log: the
-// watcher goroutine these tests start is never stopped and can still be
-// running (and logging) after its test function returns, and t.Log from a
-// goroutine that outlives its test panics.
+// testLogger discards output: the watcher goroutine outlives its test,
+// and t.Log from a goroutine after the test ends panics.
 func testLogger() *logrus.Logger {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
@@ -60,7 +58,7 @@ func TestReadDataPlaneURLsFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "urls")
-			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
 				t.Fatalf("failed to write fixture: %v", err)
 			}
 
@@ -106,16 +104,13 @@ func TestHAProxyClientSetConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// TestWatchDataPlaneURLsFileReload exercises the exact write pattern a Nomad
-// template render uses: write to a temp file in the same directory, then
-// rename it over the target. A watch held on the file path alone misses this
-// (the inode is replaced), which is why watchDataPlaneURLsFile watches the
-// directory instead - this test would hang were that not the case.
+// TestWatchDataPlaneURLsFileReload exercises a temp-file-then-rename write,
+// the same pattern Nomad's template renderer uses.
 func TestWatchDataPlaneURLsFileReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dataplane-urls")
 
-	if err := os.WriteFile(path, []byte("http://10.0.0.1:5555"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("http://10.0.0.1:5555"), 0o600); err != nil {
 		t.Fatalf("failed to seed fixture: %v", err)
 	}
 
@@ -131,7 +126,7 @@ func TestWatchDataPlaneURLsFileReload(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte("http://10.0.0.2:5555,http://10.0.0.3:5555"), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte("http://10.0.0.2:5555,http://10.0.0.3:5555"), 0o600); err != nil {
 		t.Fatalf("failed to write replacement fixture: %v", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -149,24 +144,20 @@ func TestWatchDataPlaneURLsFileReload(t *testing.T) {
 	t.Fatalf("watchDataPlaneURLsFile did not pick up the renamed file within the deadline; got %d client(s)", len(clientSet.Get()))
 }
 
-// newSeededWatch seeds a one-URL fixture file, builds its initial client
-// set, and starts watchDataPlaneURLsFile against it. Shared setup for the
-// two reload-outcome tests below.
+// newSeededWatch seeds a one-URL fixture and starts watching it.
 func newSeededWatch(t *testing.T) (path string, clientSet *haproxyClientSet) {
 	t.Helper()
 
 	dir := t.TempDir()
 	path = filepath.Join(dir, "dataplane-urls")
 
-	if err := os.WriteFile(path, []byte("http://10.0.0.1:5555"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("http://10.0.0.1:5555"), 0o600); err != nil {
 		t.Fatalf("failed to seed fixture: %v", err)
 	}
 
 	cfg := config.Config{}
 	cfg.Certificatee.HAProxyDataPlaneAPIURLsFile = path
-	// createHAProxyClients reads HAProxyDataPlaneAPIURLs, not the file path
-	// directly - main() populates this from the file at startup before the
-	// first createHAProxyClients call, so mirror that here.
+	// main() populates this from the file before the first build; mirror that.
 	cfg.Certificatee.HAProxyDataPlaneAPIURLs = []string{"http://10.0.0.1:5555"}
 
 	logger := testLogger()
@@ -183,17 +174,13 @@ func newSeededWatch(t *testing.T) (path string, clientSet *haproxyClientSet) {
 	return path, clientSet
 }
 
-// TestWatchDataPlaneURLsFileAdoptsEmptyList confirms a reload that reads
-// fine but has no URLs left in it - the sole watched target deregistering,
-// say - is adopted as a real, empty client set rather than treated as a
-// failure. This is the behavior that keeps certificatee from having to
-// choose between crashing and silently going stale when its target list
-// legitimately empties out.
+// TestWatchDataPlaneURLsFileAdoptsEmptyList: a file that reads fine but is
+// empty becomes a real empty client set, not a failure.
 func TestWatchDataPlaneURLsFileAdoptsEmptyList(t *testing.T) {
 	path, clientSet := newSeededWatch(t)
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, nil, 0o644); err != nil {
+	if err := os.WriteFile(tmp, nil, 0o600); err != nil {
 		t.Fatalf("failed to write empty replacement fixture: %v", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -211,18 +198,15 @@ func TestWatchDataPlaneURLsFileAdoptsEmptyList(t *testing.T) {
 	t.Fatalf("watchDataPlaneURLsFile did not adopt the empty list within the deadline; got %d client(s)", len(clientSet.Get()))
 }
 
-// TestWatchDataPlaneURLsFileKeepsPreviousOnReadFailure confirms a reload
-// that genuinely can't read the file - as opposed to reading it and finding
-// it empty - leaves the previous, still-good client set in place. Replacing
-// the file with a directory of the same name is a permission-independent
-// way to force os.ReadFile to fail.
+// TestWatchDataPlaneURLsFileKeepsPreviousOnReadFailure: a genuine read
+// failure (here, the file replaced by a directory) keeps the old set.
 func TestWatchDataPlaneURLsFileKeepsPreviousOnReadFailure(t *testing.T) {
 	path, clientSet := newSeededWatch(t)
 
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("failed to remove fixture: %v", err)
 	}
-	if err := os.Mkdir(path, 0o755); err != nil {
+	if err := os.Mkdir(path, 0o750); err != nil {
 		t.Fatalf("failed to replace fixture with a directory: %v", err)
 	}
 

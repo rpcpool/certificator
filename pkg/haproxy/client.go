@@ -108,12 +108,8 @@ func NewClient(cfg ClientConfig, logger *logrus.Logger) (*Client, error) {
 	}, nil
 }
 
-// NewClients creates multiple HAProxy Data Plane API clients from a list of
-// configurations. An empty or all-blank-BaseURL input is not an error: it
-// returns an empty client slice, so a caller whose target list can
-// legitimately go to zero (a sole target briefly deregistering, a tag with
-// no current members) does not have to treat "nothing to talk to right now"
-// as a failure.
+// NewClients builds a client per non-empty BaseURL. An empty input returns
+// an empty slice, not an error - a zero-length target list is valid.
 func NewClients(configs []ClientConfig, logger *logrus.Logger) ([]*Client, error) {
 	clients := make([]*Client, 0, len(configs))
 	for _, cfg := range configs {
