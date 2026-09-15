@@ -87,13 +87,11 @@ func watchDataPlaneURLsFile(cfg config.Config, logger *logrus.Logger, clientSet 
 
 	logger.Infof("HAPROXY_DATAPLANE_API_URLS_FILE watcher: watching %s for changes", path)
 
-	var debounce *time.Timer
-	reload := make(chan struct{}, 1)
-	fire := func() {
-		select {
-		case reload <- struct{}{}:
-		default:
-		}
+	// Inert until the first matching event resets it; selected on directly
+	// below instead of routed through a second channel.
+	debounce := time.NewTimer(dataPlaneURLsReloadDebounce)
+	if !debounce.Stop() {
+		<-debounce.C
 	}
 
 	for {
@@ -102,15 +100,7 @@ func watchDataPlaneURLsFile(cfg config.Config, logger *logrus.Logger, clientSet 
 			if !ok {
 				return
 			}
-			if filepath.Base(event.Name) != base {
-				continue
-			}
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
-				continue
-			}
-			if debounce == nil {
-				debounce = time.AfterFunc(dataPlaneURLsReloadDebounce, fire)
-			} else {
+			if filepath.Base(event.Name) == base && event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
 				debounce.Reset(dataPlaneURLsReloadDebounce)
 			}
 
@@ -120,7 +110,7 @@ func watchDataPlaneURLsFile(cfg config.Config, logger *logrus.Logger, clientSet 
 			}
 			logger.Errorf("HAPROXY_DATAPLANE_API_URLS_FILE watcher error: %v", err)
 
-		case <-reload:
+		case <-debounce.C:
 			reloadDataPlaneURLs(path, cfg, logger, clientSet)
 		}
 	}
