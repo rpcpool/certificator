@@ -109,8 +109,8 @@ func main() {
 	ticker := time.NewTicker(cfg.Certificatee.UpdateInterval)
 	defer ticker.Stop()
 
-	certmetrics.Up.WithLabelValues("certificatee", version, cfg.Hostname, cfg.Environment).Set(1)
-	defer certmetrics.Up.WithLabelValues("certificatee", version, cfg.Hostname, cfg.Environment).Set(0)
+	certmetrics.Up.WithLabelValues(cfg.Certificatee.ServiceName, version, cfg.Hostname, cfg.Environment).Set(1)
+	defer certmetrics.Up.WithLabelValues(cfg.Certificatee.ServiceName, version, cfg.Hostname, cfg.Environment).Set(0)
 
 	// Initial run
 	if err := maybeUpdateCertificates(logger, cfg, vaultClient, clientSet.Get(), healthChecker); err != nil {

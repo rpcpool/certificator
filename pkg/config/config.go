@@ -58,6 +58,10 @@ type Config struct {
 type Certificatee struct {
 	UpdateInterval  time.Duration `envconfig:"CERTIFICATEE_UPDATE_INTERVAL" default:"10m"`
 	RenewBeforeDays int           `envconfig:"CERTIFICATEE_RENEW_BEFORE_DAYS" default:"30"`
+	// ServiceName is the "service" label on the shared certmetrics.Up gauge.
+	// Override it per deployment (e.g. "certificatee-canary") so co-located
+	// instances don't collide on an identical label set.
+	ServiceName string `envconfig:"CERTIFICATEE_SERVICE_NAME" default:"certificatee"`
 	// HAProxyDataPlaneAPIURLs is a comma-separated list of HAProxy Data Plane API URLs
 	// Example: "http://127.0.0.1:5555,https://haproxy2.local:5555"
 	HAProxyDataPlaneAPIURLs []string `envconfig:"HAPROXY_DATAPLANE_API_URLS" default:"127.0.0.1:5555"`
