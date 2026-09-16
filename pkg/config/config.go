@@ -61,6 +61,9 @@ type Certificatee struct {
 	// HAProxyDataPlaneAPIURLs is a comma-separated list of HAProxy Data Plane API URLs
 	// Example: "http://127.0.0.1:5555,https://haproxy2.local:5555"
 	HAProxyDataPlaneAPIURLs []string `envconfig:"HAPROXY_DATAPLANE_API_URLS" default:"127.0.0.1:5555"`
+	// HAProxyDataPlaneAPIURLsFile: same list as above, from a live-reloaded
+	// file instead. Takes precedence when set - see dataplaneurls.go.
+	HAProxyDataPlaneAPIURLsFile string `envconfig:"HAPROXY_DATAPLANE_API_URLS_FILE" default:""`
 	// HAProxyDataPlaneAPIUser is the username for HAProxy Data Plane API basic auth
 	HAProxyDataPlaneAPIUser string `envconfig:"HAPROXY_DATAPLANE_API_USER"`
 	// HAProxyDataPlaneAPIPassword is the password for HAProxy Data Plane API basic auth

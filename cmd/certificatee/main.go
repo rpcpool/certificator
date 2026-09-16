@@ -66,9 +66,19 @@ func main() {
 	logger := cfg.Log.Logger
 	legoLog.Logger = logger
 
-	// Validate HAProxy Data Plane API configuration
+	// The file, when set, takes precedence over HAPROXY_DATAPLANE_API_URLS.
+	usingDataPlaneURLsFile := cfg.Certificatee.HAProxyDataPlaneAPIURLsFile != ""
+	if usingDataPlaneURLsFile {
+		urls, err := readDataPlaneURLsFile(cfg.Certificatee.HAProxyDataPlaneAPIURLsFile)
+		if err != nil {
+			logger.Fatalf("failed to read HAPROXY_DATAPLANE_API_URLS_FILE: %v", err)
+		}
+		cfg.Certificatee.HAProxyDataPlaneAPIURLs = urls
+	}
+
+	// Zero endpoints is not fatal - the ticker loop just has nothing to do.
 	if len(cfg.Certificatee.HAProxyDataPlaneAPIURLs) == 0 {
-		logger.Fatal("HAPROXY_DATAPLANE_API_URLS must be set (comma-separated list of Data Plane API URLs)")
+		logger.Warn("no HAProxy Data Plane API URLs configured yet; starting with zero endpoints")
 	}
 
 	vaultClient, err := vault.NewVaultClient(cfg.Vault.ApproleRoleID,
@@ -77,17 +87,22 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	haproxyClients, err := createHAProxyClients(cfg, logger)
+	initialClients, err := createHAProxyClients(cfg, logger)
 	if err != nil {
 		logger.Fatal(err)
+	}
+	clientSet := newHAProxyClientSet(initialClients)
+
+	if usingDataPlaneURLsFile {
+		go watchDataPlaneURLsFile(cfg, logger, clientSet)
 	}
 
 	healthChecker := newCertificateeHealthChecker(vaultClient, cfg.Certificatee.UpdateInterval)
 	certmetrics.StartMetricsServer(logger, cfg.Metrics.ListenAddress, healthChecker.Check)
 	defer certmetrics.PushMetrics(logger, cfg.Metrics.PushUrl)
 
-	logger.Infof("Configured %d HAProxy endpoint(s)", len(haproxyClients))
-	for _, client := range haproxyClients {
+	logger.Infof("Configured %d HAProxy endpoint(s)", len(initialClients))
+	for _, client := range initialClients {
 		logger.Infof("  - %s", client.Endpoint())
 	}
 
@@ -98,12 +113,12 @@ func main() {
 	defer certmetrics.Up.WithLabelValues("certificatee", version, cfg.Hostname, cfg.Environment).Set(0)
 
 	// Initial run
-	if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients, healthChecker); err != nil {
+	if err := maybeUpdateCertificates(logger, cfg, vaultClient, clientSet.Get(), healthChecker); err != nil {
 		logger.Error(err)
 	}
 
 	for range ticker.C {
-		if err := maybeUpdateCertificates(logger, cfg, vaultClient, haproxyClients, healthChecker); err != nil {
+		if err := maybeUpdateCertificates(logger, cfg, vaultClient, clientSet.Get(), healthChecker); err != nil {
 			logger.Error(err)
 		}
 	}

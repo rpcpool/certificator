@@ -108,12 +108,9 @@ func NewClient(cfg ClientConfig, logger *logrus.Logger) (*Client, error) {
 	}, nil
 }
 
-// NewClients creates multiple HAProxy Data Plane API clients from a list of configurations
+// NewClients builds a client per non-empty BaseURL. An empty input returns
+// an empty slice, not an error - a zero-length target list is valid.
 func NewClients(configs []ClientConfig, logger *logrus.Logger) ([]*Client, error) {
-	if len(configs) == 0 {
-		return nil, errors.New("at least one endpoint configuration must be provided")
-	}
-
 	clients := make([]*Client, 0, len(configs))
 	for _, cfg := range configs {
 		if cfg.BaseURL == "" {
@@ -124,10 +121,6 @@ func NewClients(configs []ClientConfig, logger *logrus.Logger) ([]*Client, error
 			return nil, errors.Wrapf(err, "failed to create client for endpoint %s", cfg.BaseURL)
 		}
 		clients = append(clients, client)
-	}
-
-	if len(clients) == 0 {
-		return nil, errors.New("no valid endpoint configurations provided")
 	}
 
 	return clients, nil
